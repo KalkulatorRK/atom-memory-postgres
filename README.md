@@ -13,6 +13,28 @@ A self-contained **Hermes skill** (schema + scripts + deployment procedure) that
 
 ---
 
+## Installation
+
+### Option A — manual tarball (recommended, always works)
+
+Download the archive from the [latest release](https://github.com/KalkulatorRK/atom-memory-postgres/releases) and unpack it into the skills directory:
+
+```bash
+curl -L -o ~/atom-memory-skill.tar.gz https://github.com/KalkulatorRK/atom-memory-postgres/releases/download/v1.0.0/atom-memory-postgres-skill.tar.gz
+tar -xzf ~/atom-memory-skill.tar.gz -C ~/.hermes/skills/
+# → ~/.hermes/skills/data-science/atom-memory-postgres/
+```
+
+### Option B — `hermes skills install` from URL
+
+```bash
+hermes skills install https://raw.githubusercontent.com/KalkulatorRK/atom-memory-postgres/main/SKILL.md
+```
+
+> ⚠️ The built-in security scanner (tirith) may block this skill from *community sources* because its setup script legitimately uses `sudo apt` / `pip install` to provision PostgreSQL. That is a false positive for a provisioning skill — use Option A, or review and trust the source yourself.
+
+---
+
 ## Why
 
 Naive chunk-based RAG splits text blindly and destroys what matters most in technical documents:

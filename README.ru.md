@@ -13,6 +13,28 @@
 
 ---
 
+## Установка
+
+### Вариант A — архивом (рекомендуется, работает всегда)
+
+Скачать архив из [последнего релиза](https://github.com/KalkulatorRK/atom-memory-postgres/releases) и распаковать в каталог скиллов:
+
+```bash
+curl -L -o ~/atom-memory-skill.tar.gz https://github.com/KalkulatorRK/atom-memory-postgres/releases/download/v1.0.0/atom-memory-postgres-skill.tar.gz
+tar -xzf ~/atom-memory-skill.tar.gz -C ~/.hermes/skills/
+# → ~/.hermes/skills/data-science/atom-memory-postgres/
+```
+
+### Вариант B — `hermes skills install` по URL
+
+```bash
+hermes skills install https://raw.githubusercontent.com/KalkulatorRK/atom-memory-postgres/main/SKILL.md
+```
+
+> ⚠️ Встроенный сканер безопасности (tirith) может заблокировать установку этого скилла из community-источника: скрипт развёртывания легально использует `sudo apt` / `pip install` для подготовки PostgreSQL. Это ложное срабатывание для установочного скилла — используйте вариант A или проверьте источник и доверьтесь ему самостоятельно.
+
+---
+
 ## Зачем
 
 Обычный RAG по «чанкам» режет текст вслепую и теряет таблицы, схемы и перекрёстные ссылки («см. рисунок 3» — а он на стр. 20). Итог: агент отвечает «примерно».
