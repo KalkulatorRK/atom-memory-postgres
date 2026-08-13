@@ -80,7 +80,7 @@ export MEMORY_ASSETS_DIR="$HOME/memory_import/assets"             # куда к�
 ## Импорт документа
 
 ```bash
-python3 scripts/import_document.py --file ГОСТ.pdf --project "Карта-НК"
+python3 scripts/import_document.py --file document.pdf --project "my-project"
 ```
 
 Конвейер: PDF → нормализация (склейка колонок) → таблицы/изображения ЦЕЛИКОМ (с `table_no`/`fig_no`) → умная резка по границам предложений (300–500 симв) → quality gate → LLM-обогащение (батчи, контекст-приписка) → запись одной транзакцией + резолвинг `refs` → `atom_links` (+`normalize_links.py` для сложных ссылок).
@@ -91,7 +91,7 @@ python3 scripts/import_document.py --file ГОСТ.pdf --project "Карта-Н�
 
 ```bash
 python3 scripts/memory_query.py "чувствительность ИКИ" --limit 5
-python3 scripts/memory_query.py "цифры 12 в номере ИКИ" --project "Карта-НК"
+python3 scripts/memory_query.py "метод контроля" --project "my-project"
 ```
 
 Логика: FTS по русским и английским стемам (`ru_en`) → если мало результатов, fallback ILIKE по значимым токенам (включая числа). Вывод компактный — агент собирает из него ответ со ссылками.

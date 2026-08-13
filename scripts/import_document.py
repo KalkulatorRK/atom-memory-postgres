@@ -5,7 +5,7 @@
 → quality gate → DeepSeek-обогащение (контекст-приписка) → резолвинг refs → PostgreSQL
 
 Использование:
-  python3 import_document.py --file путь.pdf --project "Карта-НК"
+  python3 import_document.py --file document.pdf --project "my-project"
 """
 import argparse
 import hashlib
@@ -169,7 +169,7 @@ def extract_tables_images(pdf_path: str):
                 pix = fitz.Pixmap(doc, xref)
                 if pix.n > 4:
                     pix = fitz.Pixmap(fitz.csRGB, pix)
-                fname = f"gost_p{pno+1}_img{xref}.png"
+                fname = f"img_p{pno+1}_{xref}.png"
                 fpath = os.path.join(ASSETS_DIR, fname)
                 pix.save(fpath)
 

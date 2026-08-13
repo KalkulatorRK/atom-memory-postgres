@@ -77,7 +77,7 @@ pip install pymupdf psycopg2 requests
 ### 3. Импорт документа
 
 ```bash
-python3 scripts/import_document.py --file ГОСТ.pdf --project "Карта-НК"
+python3 scripts/import_document.py --file document.pdf --project "my-project"
 # → ✅ Импортировано атомов: 235, связей: 6
 ```
 

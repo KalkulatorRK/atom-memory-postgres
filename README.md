@@ -60,7 +60,7 @@ Atom Memory solves all three:
 - **🔗 Atom links** — "see Table 5" in text becomes a real edge in `atom_links`; `deep` retrieval walks the graph.
 - **🌍 Multilingual search (RU + EN)** — morphological FTS (`to_tsvector('ru_en')`): Russian stemming for Cyrillic, English stemming for Latin, stop-words handled; numeric fallback ("12", "0.4").
 - **🧬 Versioning & audit** — `sources → versions (sha256) → atoms`; re-import = new version, history preserved.
-- **💰 Cheap enrichment** — LLM tagging costs ~**$0.003 per GOST** (40 pages) thanks to cached token pricing.
+- **💰 Cheap enrichment** — LLM tagging costs ~**$0.003 per document** (40 pages) thanks to cached token pricing.
 - **🤖 Hermes triggers** — type `память: question` or `#память question` in chat; the agent searches and answers with citations.
 
 ## Quick Start
@@ -84,7 +84,7 @@ pip install pymupdf psycopg2 requests
 ### 3. Import a document
 
 ```bash
-python3 scripts/import_document.py --file GOST.pdf --project "NDT"
+python3 scripts/import_document.py --file document.pdf --project "my-project"
 # → ✅ Imported atoms: 235, links: 6
 ```
 
@@ -130,9 +130,9 @@ Full schema: [`references/schema.sql`](references/schema.sql).
 
 | Metric | Value |
 |---|---|
-| 40-page GOST | ~235 atoms (149 text + 24 tables + 62 figures) |
+| 40-page standard | ~235 atoms (149 text + 24 tables + 62 figures) |
 | Import time | ~1 minute |
-| LLM enrichment cost | **~$0.003 / GOST** |
+| LLM enrichment cost | **~$0.003 / document** |
 | DB size (7 sources) | ~15 MB — fits a tiny VPS |
 
 ## Integration with Hermes
