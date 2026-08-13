@@ -34,6 +34,8 @@ def get_dsn():
 STOPWORDS = {
     "что", "как", "какие", "какой", "какая", "по", "для", "при", "это",
     "означает", "означают", "значит", "номер", "цифры", "цифра",
+    "the", "and", "for", "with", "from", "this", "that", "are",
+    "was", "not", "have", "been", "were", "will",
 }
 
 
@@ -64,12 +66,12 @@ def main():
     sql = """
         SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source,
                v.version_no,
-               ts_rank(to_tsvector('russian', a.content), to_tsquery('russian', %s)) AS rank
+               ts_rank(to_tsvector('ru_en', a.content), to_tsquery('ru_en', %s)) AS rank
         FROM atoms a
         JOIN versions v ON a.version_id = v.id
         JOIN sources s ON a.document_id = s.id
         WHERE a.status = 'active'
-          AND to_tsvector('russian', a.content) @@ to_tsquery('russian', %s)
+          AND to_tsvector('ru_en', a.content) @@ to_tsquery('ru_en', %s)
     """
     params = [tq, tq]
     if args.project:

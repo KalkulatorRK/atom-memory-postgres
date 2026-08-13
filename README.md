@@ -58,7 +58,7 @@ Atom Memory solves all three:
 - **📄 Document pipeline** — PDF → normalization → smart sentence-boundary splitting (300–500 chars) → quality gate → LLM enrichment → single-transaction write.
 - **📊 Tables & figures stay intact** — extracted whole with `table_no` / `fig_no` as stable cross-reference IDs.
 - **🔗 Atom links** — "see Table 5" in text becomes a real edge in `atom_links`; `deep` retrieval walks the graph.
-- **🇷🇺 Russian-first search** — full morphological FTS (`to_tsvector('russian')`) + numeric fallback ("12", "0.4").
+- **🌍 Multilingual search (RU + EN)** — morphological FTS (`to_tsvector('ru_en')`): Russian stemming for Cyrillic, English stemming for Latin, stop-words handled; numeric fallback ("12", "0.4").
 - **🧬 Versioning & audit** — `sources → versions (sha256) → atoms`; re-import = new version, history preserved.
 - **💰 Cheap enrichment** — LLM tagging costs ~**$0.003 per GOST** (40 pages) thanks to cached token pricing.
 - **🤖 Hermes triggers** — type `память: question` or `#память question` in chat; the agent searches and answers with citations.
@@ -112,7 +112,7 @@ PDF ──► [1] parse (pymupdf)
      ──► [6] single transaction: sources → versions (sha256) → atoms (+ atom_links)
 ```
 
-Search pipeline: metadata filters (project/tags/type) → Russian morphological FTS → follow `atom_links` to pull referenced tables/figures into context.
+Search pipeline: metadata filters (project/tags/type) → RU+EN morphological FTS (`ru_en` config) → follow `atom_links` to pull referenced tables/figures into context.
 
 ## Database Schema
 

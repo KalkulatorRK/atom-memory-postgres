@@ -22,6 +22,11 @@ SET row_security = off;
 --
 
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+-- Мультиязычная конфигурация FTS: кириллица -> russian_stem, латиница -> english_stem
+CREATE TEXT SEARCH CONFIGURATION ru_en (COPY = simple);
+ALTER TEXT SEARCH CONFIGURATION ru_en ALTER MAPPING FOR asciiword, asciihword, hword_asciipart WITH english_stem;
+ALTER TEXT SEARCH CONFIGURATION ru_en ALTER MAPPING FOR word, hword, hword_part WITH russian_stem;
+
 
 
 --
@@ -414,7 +419,7 @@ ALTER TABLE ONLY public.versions
 -- Name: idx_atoms_fts; Type: INDEX; Schema: public; Owner: postgres
 --
 
-CREATE INDEX idx_atoms_fts ON public.atoms USING gin (to_tsvector('russian'::regconfig, content));
+CREATE INDEX idx_atoms_fts ON public.atoms USING gin (to_tsvector('ru_en'::regconfig, content));
 
 
 --
