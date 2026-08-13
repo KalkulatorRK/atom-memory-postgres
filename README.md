@@ -61,7 +61,7 @@ Atom Memory solves all three:
 - **🌍 Multilingual search (RU + EN)** — morphological FTS (`to_tsvector('ru_en')`): Russian stemming for Cyrillic, English stemming for Latin, stop-words handled; numeric fallback ("12", "0.4").
 - **🧬 Versioning & audit** — `sources → versions (sha256) → atoms`; re-import = new version, history preserved.
 - **💰 Cheap enrichment** — LLM tagging costs ~**$0.003 per document** (40 pages) thanks to cached token pricing.
-- **🤖 Hermes triggers** — type `память: question` or `#память question` in chat; the agent searches and answers with citations.
+- **🤖 Hermes triggers** — type `память: question`, `#память question`, `memory: question` or `#memory question` in chat; the bundled `memory_trigger.py` detects the trigger and runs the search — answers come with citations.
 
 ## Quick Start
 
