@@ -21,8 +21,7 @@
 
 ```bash
 curl -L -o ~/atom-memory-skill.tar.gz https://github.com/KalkulatorRK/atom-memory-postgres/releases/latest/download/atom-memory-postgres-skill.tar.gz
-mkdir -p ~/.hermes/skills/data-science/atom-memory-postgres
-tar -xzf ~/atom-memory-skill.tar.gz -C ~/.hermes/skills/data-science/atom-memory-postgres
+tar -xzf ~/atom-memory-skill.tar.gz -C ~/.hermes/skills/
 # → ~/.hermes/skills/data-science/atom-memory-postgres/
 ```
 

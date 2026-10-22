@@ -363,11 +363,11 @@ def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
     return enriched
 
 
-def _unchanged(pdf_path, project_name):
-    """True, если этот файл уже импортирован с тем же sha.
+def _existing_source(pdf_path):
+    """Источник с этим путём независимо от проекта, или None.
 
-    Проверяется до нарезки и LLM: иначе неизменённый документ всё равно
-    уходит во внешний API и стоит денег.
+    location уникален глобально, поэтому один файл не может лежать в двух
+    проектах. Проверяется до нарезки и LLM.
     """
     pdf_path = os.path.abspath(pdf_path)
     with open(pdf_path, "rb") as fh:
@@ -375,19 +375,25 @@ def _unchanged(pdf_path, project_name):
     conn = get_pg()
     cur = conn.cursor()
     cur.execute(
-        "SELECT s.content_sha FROM sources s "
-        "JOIN projects p ON s.project_id = p.id "
-        "WHERE s.location = %s AND p.name = %s",
-        (pdf_path, project_name))
+        "SELECT p.name, s.content_sha FROM sources s "
+        "JOIN projects p ON s.project_id = p.id WHERE s.location = %s",
+        (pdf_path,))
     row = cur.fetchone()
     cur.close()
     conn.close()
-    return bool(row) and row[0] == sha
+    if not row:
+        return None
+    return {"project": row[0], "sha": row[1], "same": row[1] == sha}
 
 
 def import_doc(pdf_path, project_name):
     t0 = time.time()
-    if _unchanged(pdf_path, project_name):
+    existing = _existing_source(pdf_path)
+    if existing and existing["project"] != project_name:
+        raise SystemExit(
+            f"Файл уже импортирован в проект '{existing['project']}'. "
+            f"Один файл не может лежать в двух проектах (location уникален).")
+    if existing and existing["same"]:
         print("      Без изменений (sha совпал), импорт пропущен")
         return 0, 0
     print(f"[1/4] Конвертация PDF → текст...")
