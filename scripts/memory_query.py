@@ -61,12 +61,12 @@ def main():
     sql = """
         SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source,
                v.version_no,
-               ts_rank(to_tsvector('public.ru_en', a.content), to_tsquery('public.ru_en', %s)) AS rank
+               ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) AS rank
         FROM atoms a
         JOIN versions v ON a.version_id = v.id
         JOIN sources s ON a.document_id = s.id
         WHERE a.status = 'active'
-          AND to_tsvector('public.ru_en', a.content) @@ to_tsquery('public.ru_en', %s)
+          AND a.tsv @@ to_tsquery('public.ru_en', %s)
     """
     params = [tq, tq]
     if args.project:

@@ -29,6 +29,7 @@ def get_pg():
 
 
 def search_atoms(query: str, project: str = "", limit: int = 5):
+    limit = max(1, min(int(limit), 50))
     conn = get_pg()
     cur = conn.cursor()
     tq = fts_query(query)
@@ -36,13 +37,13 @@ def search_atoms(query: str, project: str = "", limit: int = 5):
     sql = """
         SELECT a.id, a.atom_type, a.content, a.metadata, a.document_id,
                s.title AS source, v.version_no,
-               ts_rank(to_tsvector('public.ru_en', a.content), to_tsquery('public.ru_en', %s)) AS rank
+               ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) AS rank
         FROM atoms a
         JOIN versions v ON a.version_id = v.id
         JOIN sources s ON a.document_id = s.id
         JOIN projects p ON s.project_id = p.id
         WHERE a.status = 'active'
-          AND to_tsvector('public.ru_en', a.content) @@ to_tsquery('public.ru_en', %s)
+          AND a.tsv @@ to_tsquery('public.ru_en', %s)
     """
     params = [tq, tq]
     if project:
@@ -212,11 +213,16 @@ def main():
                     else:
                         out = {"jsonrpc": "2.0", "id": req.get("id"),
                                "result": {"content": [{"type": "text", "text": "неизвестный инструмент"}]}}
+                elif method == "initialize":
+                    out = {"jsonrpc": "2.0", "id": req.get("id"), "result": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "memory-atom-db", "version": "1.5.0"}}}
                 else:
                     out = {"jsonrpc": "2.0", "id": req.get("id"), "result": {}}
                 print(json.dumps(out, ensure_ascii=False), flush=True)
-            except Exception:
-                pass
+            except Exception as e:
+                sys.stderr.write(f"mcp fallback: {e}\n")
 
 
 if __name__ == "__main__":

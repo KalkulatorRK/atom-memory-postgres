@@ -2,6 +2,7 @@
 """Тесты нарезки и сборки запроса. БД не нужна."""
 import os
 import sys
+import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -65,6 +66,14 @@ def test_page_boundary_does_not_roll_back():
 
 def test_fts_query_empty_is_safe():
     assert fts_query("что как по") == "''"
+
+
+class SplitTests(unittest.TestCase):
+    pass
+
+
+for _name in [k for k in list(globals()) if k.startswith("test_")]:
+    setattr(SplitTests, _name, staticmethod(globals().pop(_name)))
 
 
 if __name__ == "__main__":

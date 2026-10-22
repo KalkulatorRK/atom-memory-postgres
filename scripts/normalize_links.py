@@ -12,6 +12,7 @@
 import argparse
 import json
 import os
+import sys
 import re
 
 PG_DSN = os.environ.get("PG_DSN") or ""
@@ -115,8 +116,8 @@ def resolve_links(version_id):
                         (aid, to_id, f"references_{rtype}"))
                     if cur.rowcount > 0:
                         created += 1
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"      ссылка не записалась: {e}", file=sys.stderr)
 
     conn.commit()
     cur.close()

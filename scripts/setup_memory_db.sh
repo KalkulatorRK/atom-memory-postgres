@@ -23,18 +23,36 @@ if ! [[ "$DB_NAME" =~ $ident && "$DB_USER" =~ $ident ]]; then
     exit 1
 fi
 
-echo "[1/4] Установка PostgreSQL 16 + pgvector..."
+echo "[1/4] Установка PostgreSQL + pgvector..."
+# Версия не зашита: берём установленную (PG_VERSION переопределяет) или ставим
+# метапакеты дистрибутива, которые тянут актуальную.
+PG_VERSION="${PG_VERSION:-}"
+if [ -z "$PG_VERSION" ] && command -v pg_lsclusters >/dev/null; then
+    PG_VERSION=$(pg_lsclusters --no-header | awk '{print $1; exit}')
+fi
 apt-get update -y
-apt-get install -y postgresql-16 postgresql-16-pgvector
+if [ -n "$PG_VERSION" ]; then
+    apt-get install -y "postgresql-$PG_VERSION" "postgresql-$PG_VERSION-pgvector" ||         apt-get install -y postgresql postgresql-pgvector
+else
+    apt-get install -y postgresql postgresql-pgvector
+    PG_VERSION=$(pg_lsclusters --no-header | awk '{print $1; exit}')
+fi
+echo "      PostgreSQL $PG_VERSION"
 
 echo "[2/4] Эконом-конфиг (для слабых VPS; на мощных машинах можно пропустить)..."
-CONF=/etc/postgresql/16/main/postgresql.conf
-sed -i "s/^#*shared_buffers.*/shared_buffers = 128MB/" "$CONF"
-sed -i "s/^#*work_mem.*/work_mem = 4MB/" "$CONF"
-sed -i "s/^#*maintenance_work_mem.*/maintenance_work_mem = 64MB/" "$CONF"
-sed -i "s/^#*max_connections.*/max_connections = 20/" "$CONF"
-sed -i "s/^#*effective_cache_size.*/effective_cache_size = 512MB/" "$CONF"
-systemctl restart postgresql
+CONF="/etc/postgresql/$PG_VERSION/main/postgresql.conf"
+if [ -f "$CONF" ]; then
+    sed -i "s/^#*shared_buffers.*/shared_buffers = 128MB/" "$CONF"
+    sed -i "s/^#*work_mem.*/work_mem = 4MB/" "$CONF"
+    sed -i "s/^#*maintenance_work_mem.*/maintenance_work_mem = 64MB/" "$CONF"
+    sed -i "s/^#*max_connections.*/max_connections = 20/" "$CONF"
+    sed -i "s/^#*effective_cache_size.*/effective_cache_size = 512MB/" "$CONF"
+fi
+if command -v systemctl >/dev/null && systemctl is-system-running >/dev/null 2>&1; then
+    systemctl restart postgresql
+elif command -v pg_ctlcluster >/dev/null; then
+    pg_ctlcluster "$PG_VERSION" main restart
+fi
 
 echo "[3/4] Создание БД $DB_NAME и пользователя $DB_USER..."
 # Расширение vector — в целевой БД и от суперпользователя: pgvector не trusted,
@@ -65,10 +83,10 @@ done
 
 # Права на созданные объекты — отдельным шагом, после того как таблицы есть.
 sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
-SELECT format('GRANT ALL ON ALL TABLES IN SCHEMA public TO %I', :'db_user') \gexec
-SELECT format('GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO %I', :'db_user') \gexec
-SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO %I', :'db_user') \gexec
-SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO %I', :'db_user') \gexec
+SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', :'db_user') \gexec
+SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'db_user') \gexec
+SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', :'db_user') \gexec
+SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO %I', :'db_user') \gexec
 SQL
 
 echo ""

@@ -197,7 +197,7 @@ def extract_tables_images(pdf_path: str):
                     "page": pno + 1,
                 })
         except Exception as e:
-            pass
+            print(f"      не извлеклось на стр. {pno + 1}: {e}", file=sys.stderr)
 
         # ===== ИЗОБРАЖЕНИЯ =====
         try:
@@ -227,7 +227,7 @@ def extract_tables_images(pdf_path: str):
                     "page": pno + 1,
                 })
         except Exception as e:
-            pass
+            print(f"      не извлеклось на стр. {pno + 1}: {e}", file=sys.stderr)
 
     doc.close()
     return tables, images
@@ -340,8 +340,7 @@ def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                                  "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+                    "User-Agent": "atom-memory-postgres/1.5",
                 },
                 json={
                     "model": os.environ.get("LLM_MODEL", "deepseek/deepseek-v4-flash"),
@@ -613,8 +612,8 @@ def import_doc(pdf_path, project_name):
                         "ON CONFLICT DO NOTHING",
                         (from_id, row[0], f"references_{rtype}"))
                     links += cur.rowcount
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"      ссылка не записалась: {e}", file=sys.stderr)
 
     cur.execute(
         "INSERT INTO journal (op_type, details) VALUES ('import', %s::jsonb)",
