@@ -31,12 +31,16 @@ if [ -z "$PG_VERSION" ] && command -v pg_lsclusters >/dev/null; then
     PG_VERSION=$(pg_lsclusters --no-header | awk '{print $1; exit}')
 fi
 apt-get update -y
-if [ -n "$PG_VERSION" ]; then
-    apt-get install -y "postgresql-$PG_VERSION" "postgresql-$PG_VERSION-pgvector" ||         apt-get install -y postgresql postgresql-pgvector
-else
-    apt-get install -y postgresql postgresql-pgvector
+# Пакета «postgresql-pgvector» нет: pgvector называется по версии, например
+# postgresql-16-pgvector. Ставим сам сервер, узнаём версию, ставим расширение.
+if [ -z "$PG_VERSION" ]; then
+    apt-get install -y postgresql
     PG_VERSION=$(pg_lsclusters --no-header | awk '{print $1; exit}')
+else
+    apt-get install -y "postgresql-$PG_VERSION"
 fi
+apt-get install -y "postgresql-$PG_VERSION-pgvector" || {
+    echo "Собрать pgvector вручную: https://github.com/pgvector/pgvector"; exit 1; }
 echo "      PostgreSQL $PG_VERSION"
 
 echo "[2/4] Эконом-конфиг (для слабых VPS; на мощных машинах можно пропустить)..."
@@ -62,11 +66,11 @@ sudo -u postgres psql -v ON_ERROR_STOP=1 \
     -v db_name="$DB_NAME" -v db_user="$DB_USER" -v db_pass="$DB_PASS" <<'SQL'
 SELECT format('CREATE DATABASE %I', :'db_name') \gexec
 SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'db_user', :'db_pass') \gexec
-SELECT format('GRANT ALL PRIVILEGES ON DATABASE %I TO %I', :'db_name', :'db_user') \gexec
+SELECT format('GRANT CONNECT, TEMPORARY ON DATABASE %I TO %I', :'db_name', :'db_user') \gexec
 SQL
 sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
-SELECT format('GRANT USAGE, CREATE ON SCHEMA public TO %I', :'db_user') \gexec
+SELECT format('GRANT USAGE ON SCHEMA public TO %I', :'db_user') \gexec
 SQL
 
 echo "[4/4] Применение схемы..."

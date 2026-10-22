@@ -36,8 +36,10 @@ def get_pg():
 def pdf_to_pages(pdf_path: str):
     """Шаг 1: PDF → список (номер_страницы, текст). Документ закрывается.
 
-    Текст внутри найденных таблиц вырезается: иначе ячейки попадают и в атом
-    таблицы, и в текстовые атомы, а текстовый атом получает чужую страницу.
+    Текст внутри найденных таблиц вырезается по строкам: иначе ячейки попадают
+    и в атом таблицы, и в текстовые атомы, а текстовый атом получает чужую
+    страницу. Удаляются строки, а не блоки — блок может склеить последнюю
+    строку таблицы с абзацем под ней, и вырезание блока затирало бы абзац.
     """
     import fitz
     doc = fitz.open(pdf_path)
@@ -46,13 +48,22 @@ def pdf_to_pages(pdf_path: str):
         for page in doc:
             text = page.get_text()
             for tab in _safe_tables(page):
-                for block in page.get_text("blocks"):
-                    if _overlaps(block[:4], tab.bbox):
-                        text = text.replace(block[4], "")
+                for line in _lines(page):
+                    if _overlaps(line["bbox"], tab.bbox):
+                        text = text.replace(line["text"], "", 1)
             pages.append((page.number + 1, text))
         return pages
     finally:
         doc.close()
+
+
+def _lines(page):
+    out = []
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            txt = "".join(sp["text"] for sp in line.get("spans", []))
+            out.append({"bbox": line["bbox"], "text": txt})
+    return out
 
 
 def _safe_tables(page):

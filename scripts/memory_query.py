@@ -57,46 +57,50 @@ def main():
     conn = psycopg2.connect(get_dsn())
     cur = conn.cursor()
 
-    tq = fts_query(args.query)
-    sql = """
-        SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source,
-               v.version_no,
-               ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) AS rank
-        FROM atoms a
-        JOIN versions v ON a.version_id = v.id
-        JOIN sources s ON a.document_id = s.id
-        WHERE a.status = 'active'
-          AND a.tsv @@ to_tsquery('public.ru_en', %s)
-    """
-    params = [tq, tq]
-    if args.project:
-        sql += " AND s.project_id IN (SELECT id FROM projects WHERE name = %s)"
-        params.append(args.project)
-    sql += " ORDER BY rank DESC LIMIT %s"
-    params.append(args.limit)
+    rows = []
 
-    cur.execute(sql, params)
-    rows = cur.fetchall()
+    # FTS по русским стемам. Пустой tsquery (только числа/стоп-слова) пропускаем:
+    # to_tsquery('') падает с syntax error, такие запросы уходят сразу в ILIKE.
+    tq = fts_query(args.query)
+    if tq:
+        sql = """
+            SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source,
+                   v.version_no,
+                   ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) AS rank
+            FROM atoms a
+            JOIN versions v ON a.version_id = v.id
+            JOIN sources s ON a.document_id = s.id
+            WHERE a.status = 'active'
+              AND a.tsv @@ to_tsquery('public.ru_en', %s)
+        """
+        params = [tq, tq]
+        if args.project:
+            sql += " AND s.project_id IN (SELECT id FROM projects WHERE name = %s)"
+            params.append(args.project)
+        sql += " ORDER BY rank DESC LIMIT %s"
+        params.append(args.limit)
+        cur.execute(sql, params)
+        rows = cur.fetchall()
 
     if len(rows) < args.limit:
-        # Добираем ILIKE-выдачей (числа FTS не ловит), но уже найденное не выбрасываем.
+        # Добираем ILIKE-выдачей (числа FTS не ловит), уже найденное не выбрасываем.
         seen = {r[0] for r in rows}
         terms = terms_for_ili(args.query)
         if terms:
-            cond = " OR ".join(["a.content ILIKE '%%' || %s || '%%'" for _ in terms])
-            cur.execute(
-                """
-                SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source,
-                       v.version_no, 0 AS rank
-                FROM atoms a
-                JOIN versions v ON a.version_id = v.id
-                JOIN sources s ON a.document_id = s.id
-                WHERE a.status = 'active' AND (%s)
-                  AND (%s = '' OR s.project_id IN (SELECT id FROM projects WHERE name = %s))
-                ORDER BY a.id LIMIT %s
-                """ % (cond, "%s"),
-                terms + [args.project, args.project, args.limit],
-            )
+            conds = " OR ".join(["a.content ILIKE %s" for _ in terms])
+            q = ("SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source, "
+                 "v.version_no, 0 AS rank "
+                 "FROM atoms a "
+                 "JOIN versions v ON a.version_id = v.id "
+                 "JOIN sources s ON a.document_id = s.id "
+                 "WHERE a.status = 'active' AND (" + conds + ")")
+            qparams = [f"%{t}%" for t in terms]
+            if args.project:
+                q += " AND s.project_id IN (SELECT id FROM projects WHERE name = %s)"
+                qparams.append(args.project)
+            q += " ORDER BY a.id LIMIT %s"
+            qparams.append(args.limit)
+            cur.execute(q, qparams)
             for r in cur.fetchall():
                 if r[0] not in seen and len(rows) < args.limit:
                     rows.append(r)

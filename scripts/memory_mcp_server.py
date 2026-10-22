@@ -32,28 +32,53 @@ def search_atoms(query: str, project: str = "", limit: int = 5):
     limit = max(1, min(int(limit), 50))
     conn = get_pg()
     cur = conn.cursor()
+
+    rows = []
     tq = fts_query(query)
+    if tq:
+        sql = """
+            SELECT a.id, a.atom_type, a.content, a.metadata, a.document_id,
+                   s.title AS source, v.version_no,
+                   ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) AS rank
+            FROM atoms a
+            JOIN versions v ON a.version_id = v.id
+            JOIN sources s ON a.document_id = s.id
+            JOIN projects p ON s.project_id = p.id
+            WHERE a.status = 'active'
+              AND a.tsv @@ to_tsquery('public.ru_en', %s)
+        """
+        params = [tq, tq]
+        if project:
+            sql += " AND p.name = %s"
+            params.append(project)
+        sql += " ORDER BY rank DESC LIMIT %s"
+        params.append(limit)
+        cur.execute(sql, params)
+        rows = cur.fetchall()
 
-    sql = """
-        SELECT a.id, a.atom_type, a.content, a.metadata, a.document_id,
-               s.title AS source, v.version_no,
-               ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) AS rank
-        FROM atoms a
-        JOIN versions v ON a.version_id = v.id
-        JOIN sources s ON a.document_id = s.id
-        JOIN projects p ON s.project_id = p.id
-        WHERE a.status = 'active'
-          AND a.tsv @@ to_tsquery('public.ru_en', %s)
-    """
-    params = [tq, tq]
-    if project:
-        sql += " AND p.name ILIKE %s"
-        params.append(f"%{project}%")
-    sql += " ORDER BY rank DESC LIMIT %s"
-    params.append(limit)
-
-    cur.execute(sql, params)
-    rows = cur.fetchall()
+    if len(rows) < limit:
+        seen = {r[0] for r in rows}
+        terms = [w for w in re.findall(r"[а-яёa-z0-9.-]{2,}", query.lower(), re.UNICODE)
+                 if w not in ("что", "как", "какие", "какой", "по", "для", "при")][:4]
+        if terms:
+            conds = " OR ".join(["a.content ILIKE %s" for _ in terms])
+            q = ("SELECT a.id, a.atom_type, a.content, a.metadata, a.document_id, "
+                 "s.title AS source, v.version_no, 0 AS rank "
+                 "FROM atoms a "
+                 "JOIN versions v ON a.version_id = v.id "
+                 "JOIN sources s ON a.document_id = s.id "
+                 "JOIN projects p ON s.project_id = p.id "
+                 "WHERE a.status = 'active' AND (" + conds + ")")
+            qparams = [f"%{t}%" for t in terms]
+            if project:
+                q += " AND p.name = %s"
+                qparams.append(project)
+            q += " ORDER BY a.id LIMIT %s"
+            qparams.append(limit)
+            cur.execute(q, qparams)
+            for r in cur.fetchall():
+                if r[0] not in seen and len(rows) < limit:
+                    rows.append(r)
 
     results = []
     for aid, atype, content, meta, docid, source, vno, rank in rows:
@@ -217,12 +242,14 @@ def main():
                     out = {"jsonrpc": "2.0", "id": req.get("id"), "result": {
                         "protocolVersion": "2024-11-05",
                         "capabilities": {"tools": {}},
-                        "serverInfo": {"name": "memory-atom-db", "version": "1.5.0"}}}
+                        "serverInfo": {"name": "memory-atom-db", "version": "1.6.0"}}}
                 else:
                     out = {"jsonrpc": "2.0", "id": req.get("id"), "result": {}}
                 print(json.dumps(out, ensure_ascii=False), flush=True)
             except Exception as e:
                 sys.stderr.write(f"mcp fallback: {e}\n")
+                err = {"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": str(e)}}
+                print(json.dumps(err, ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":

@@ -24,4 +24,4 @@ def fts_query(q: str) -> str:
     не обнулял выдачу (AND всех слов почти ничего не находил)."""
     words = re.findall(r"[а-яёa-z]{3,}", q.lower(), re.UNICODE)
     words = [w for w in words if w not in STOPWORDS]
-    return " | ".join(words) or "''"
+    return " | ".join(words) or None
