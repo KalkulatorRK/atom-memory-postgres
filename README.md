@@ -21,7 +21,8 @@ Download the archive from the [latest release](https://github.com/KalkulatorRK/a
 
 ```bash
 curl -L -o ~/atom-memory-skill.tar.gz https://github.com/KalkulatorRK/atom-memory-postgres/releases/latest/download/atom-memory-postgres-skill.tar.gz
-tar -xzf ~/atom-memory-skill.tar.gz -C ~/.hermes/skills/
+mkdir -p ~/.hermes/skills/data-science/atom-memory-postgres
+tar -xzf ~/atom-memory-skill.tar.gz -C ~/.hermes/skills/data-science/atom-memory-postgres
 # → ~/.hermes/skills/data-science/atom-memory-postgres/
 ```
 

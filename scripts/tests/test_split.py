@@ -48,6 +48,21 @@ def test_fts_query_uses_or_and_drops_stopwords():
     assert "чувствительности" in q
 
 
+def test_page_boundary_does_not_roll_back():
+    """Атом на стыке страниц цитирует страницу начала, а следующий за ним
+    не откатывается на предыдущую."""
+    head = "Предложение достаточно длинное для отдельного атома. " * 12
+    tail = "Продолжение на следующей странице тоже длинное. " * 12
+    text = f"<!-- страница 1 --> {head}\n\n<!-- страница 2 --> {tail}"
+    atoms = smart_split(text)
+    # атом, начатый на стр.1 и содержащий маркер стр.2, остаётся стр.1
+    crossing = [a for a in atoms if "страница 2" in a["content"]]
+    assert crossing and crossing[0]["page"] == 1, [a["page"] for a in crossing]
+    # всё, что целиком после маркера стр.2, — страница 2, не 1
+    after = atoms[atoms.index(crossing[0]) + 1:]
+    assert after and all(a["page"] == 2 for a in after), [a["page"] for a in after]
+
+
 def test_fts_query_empty_is_safe():
     assert fts_query("что как по") == "''"
 

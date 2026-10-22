@@ -56,13 +56,8 @@ sudo bash scripts/setup_memory_db.sh memory hermes 'ваш_пароль'
 Он ставит PostgreSQL 16 + pgvector, создаёт БД и роль, применяет схему от
 суперпользователя и выдаёт права. Пароль в лог не печатается.
 
-Дополнительные индексы (хранимый `tsv`, pg_trgm) применяются отдельно и тоже
-от суперпользователя — роль приложения не владеет таблицами:
-
-```bash
-sudo -u postgres psql -d memory -v ON_ERROR_STOP=1 \
-    -f references/migrations/0002_indexes.sql
-```
+Индексы из `references/migrations/0002_indexes.sql` скрипт применяет сам.
+Повторно их можно накатить той же командой — файл идемпотентен.
 
 ### 4. Переменные окружения
 

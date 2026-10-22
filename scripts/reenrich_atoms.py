@@ -34,7 +34,7 @@ def main():
 
     cur.execute(
         """
-        SELECT a.id, a.ordinal, a.content
+        SELECT a.id, a.ordinal, a.content, a.metadata->>'page'
         FROM atoms a JOIN versions v ON a.version_id = v.id
         WHERE a.version_id = %s AND a.atom_type = 'text'
           AND NOT (jsonb_typeof(a.metadata -> 'tags') = 'array'
@@ -48,7 +48,8 @@ def main():
     if not rows:
         return
 
-    atoms = [{"id": rid, "ordinal": ord_, "atom_type": "text", "content": c} for rid, ord_, c in rows]
+    atoms = [{"id": rid, "ordinal": ord_, "atom_type": "text", "content": c,
+              "page": int(pg) if pg else None} for rid, ord_, c, pg in rows]
     batches = [atoms[i:i + args.batch] for i in range(0, len(atoms), args.batch)]
 
     results = {}

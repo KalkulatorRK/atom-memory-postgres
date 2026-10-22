@@ -88,15 +88,18 @@ def smart_split(text: str):
     page = None
     ordinal = 0
 
-    def page_of(fragment):
-        marks = re.findall(r'<!-- страница (\d+) -->', fragment)
-        return int(marks[0]) if marks else None
-
     def emit(buf):
         nonlocal ordinal, page
+        # Страница атома — та, на которой он начался. Если буфер открывается
+        # маркером, начинаем с него; иначе продолжаем текущую страницу.
+        # Текущую страницу после атома двигаем по последнему маркеру,
+        # иначе атом на стыке откатывает нумерацию всех следующих.
+        marks = re.findall(r'<!-- страница (\d+) -->', buf)
+        start = int(marks[0]) if buf.lstrip().startswith("<!--") and marks else page
         atoms.append({"ordinal": ordinal, "content": buf, "atom_type": "text",
-                      "page": page_of(buf) or page})
-        page = page_of(buf) or page
+                      "page": start})
+        if marks:
+            page = int(marks[-1])
         ordinal += 1
 
     for sent in sentences:

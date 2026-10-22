@@ -1,5 +1,7 @@
 -- Дополнительные индексы поверх схемы 0001. Идемпотентно: можно гонять повторно.
--- Применять: psql "$PG_DSN" -v ON_ERROR_STOP=1 -f references/migrations/0002_indexes.sql
+-- Применять от суперпользователя: роль приложения не владеет таблицами.
+--   sudo -u postgres psql -d <db> -v ON_ERROR_STOP=1 -f references/migrations/0002_indexes.sql
+-- setup_memory_db.sh применяет этот файл сам.
 
 -- Хранимый tsvector: ts_rank перестаёт пересчитывать вектор на каждую строку.
 ALTER TABLE public.atoms
