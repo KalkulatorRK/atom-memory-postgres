@@ -47,7 +47,7 @@ def pdf_to_pages(pdf_path: str):
             text = page.get_text()
             for tab in _safe_tables(page):
                 for block in page.get_text("blocks"):
-                    if _inside(block[:4], tab.bbox):
+                    if _overlaps(block[:4], tab.bbox):
                         text = text.replace(block[4], "")
             pages.append((page.number + 1, text))
         return pages
@@ -63,9 +63,11 @@ def _safe_tables(page):
         return []
 
 
-def _inside(block, bbox, tol=2):
+def _overlaps(block, bbox):
+    """Пересечение, а не полное вхождение: строка на границе таблицы
+    иначе оставалась в текстовом атоме."""
     x0, y0, x1, y1 = block
-    return x0 >= bbox[0] - tol and y0 >= bbox[1] - tol and x1 <= bbox[2] + tol and y1 <= bbox[3] + tol
+    return x0 < bbox[2] and x1 > bbox[0] and y0 < bbox[3] and y1 > bbox[1]
 
 
 def pdf_to_text(pdf_path: str) -> str:
@@ -249,17 +251,20 @@ def _nearest_caption(page, bbox, kind):
                         r'([0-9]+(?:\.[0-9]+)?|[А-Яа-яA-Za-z](?:\.[0-9]+)?)(?!\w)')
         above = False
     best, best_dist = None, None
-    for b in page.get_text("blocks"):
-        x0, y0, x1, y1, text = b[:5]
-        vgap = (bbox[1] - y1) if above else (y0 - bbox[3])
-        if vgap < -5:
-            continue
-        for m in rx.finditer(text or ""):
-            # горизонталь: совпадение внутри блока, положение оцениваем по блоку
-            hgap = 0 if x1 >= bbox[0] and x0 <= bbox[2] else min(abs(x0 - bbox[2]), abs(bbox[0] - x1))
-            dist = vgap + hgap
-            if best_dist is None or dist < best_dist:
-                best, best_dist = m, dist
+    # get_text("dict") даёт bbox каждой строки, а не всего блока: две подписи
+    # в одной строке иначе получают одинаковый зазор и обе становятся первыми.
+    for block in page.get_text("dict").get("blocks", []):
+        for line in block.get("lines", []):
+            x0, y0, x1, y1 = line["bbox"]
+            text = "".join(sp["text"] for sp in line.get("spans", []))
+            vgap = (bbox[1] - y1) if above else (y0 - bbox[3])
+            if vgap < -5:
+                continue
+            for m in rx.finditer(text):
+                hgap = 0 if x1 >= bbox[0] and x0 <= bbox[2] else min(abs(x0 - bbox[2]), abs(bbox[0] - x1))
+                dist = vgap + hgap
+                if best_dist is None or dist < best_dist:
+                    best, best_dist = m, dist
     if not best:
         return None, ""
     number = best.group(1)

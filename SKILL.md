@@ -36,7 +36,7 @@ metadata:
 
 ### 1. Postgres
 
-Нужен PostgreSQL 16+ с pgvector. На Ubuntu: `sudo apt-get install -y postgresql postgresql-pgvector`.
+Нужен PostgreSQL 16+ с pgvector. Пакет pgvector называется по версии, например `postgresql-16-pgvector` или `postgresql-17-pgvector`. Скрипт установки подбирает его сам.
 Эконом-конфиг для слабого VPS скрипт установки применяет сам, править `postgresql.conf` руками не нужно.
 
 ### 2–3. БД, роль, схема и права
@@ -49,7 +49,7 @@ metadata:
 sudo bash scripts/setup_memory_db.sh memory hermes 'ваш_пароль'
 ```
 
-Он ставит PostgreSQL 16 + pgvector, создаёт БД и роль, применяет схему от
+Он ставит PostgreSQL и pgvector, создаёт БД и роль, применяет схему от
 суперпользователя и выдаёт права. Пароль в лог не печатается.
 
 Скрипт сам применяет схему и все миграции из `references/migrations/`.

@@ -70,8 +70,8 @@ def main():
     """
     params = [tq, tq]
     if args.project:
-        sql += " AND s.project_id IN (SELECT id FROM projects WHERE name ILIKE %s)"
-        params.append(f"%{args.project}%")
+        sql += " AND s.project_id IN (SELECT id FROM projects WHERE name = %s)"
+        params.append(args.project)
     sql += " ORDER BY rank DESC LIMIT %s"
     params.append(args.limit)
 
@@ -92,9 +92,10 @@ def main():
                 JOIN versions v ON a.version_id = v.id
                 JOIN sources s ON a.document_id = s.id
                 WHERE a.status = 'active' AND (%s)
+                  AND (%s = '' OR s.project_id IN (SELECT id FROM projects WHERE name = %s))
                 ORDER BY a.id LIMIT %s
                 """ % (cond, "%s"),
-                terms + [args.limit],
+                terms + [args.project, args.project, args.limit],
             )
             for r in cur.fetchall():
                 if r[0] not in seen and len(rows) < args.limit:

@@ -139,7 +139,7 @@ hermes skills install <url/SKILL.md или архив>
 ## Требования
 
 - Linux (Ubuntu 24.04 проверен), Python 3.10+
-- PostgreSQL 16 + pgvector
+- PostgreSQL 16+ + pgvector
 - LLM API ключ — опционально (для обогащения метаданных)
 
 ## Лицензия

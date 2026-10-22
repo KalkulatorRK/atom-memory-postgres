@@ -68,7 +68,7 @@ Atom Memory solves all three:
 
 ## Quick Start
 
-### 1. Deploy the database (PostgreSQL 16 + pgvector + schema)
+### 1. Deploy the database (PostgreSQL 16+ + pgvector + schema)
 
 ```bash
 sudo bash scripts/setup_memory_db.sh memory hermes your_password
@@ -151,7 +151,7 @@ The agent then recognizes `память:`, `#память`, `memory:` message tr
 ## Requirements
 
 - Linux (Ubuntu 24.04 tested), Python 3.10+
-- PostgreSQL 16 + pgvector
+- PostgreSQL 16+ + pgvector
 - LLM API key — optional (metadata enrichment only)
 
 ## License

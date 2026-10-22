@@ -57,7 +57,7 @@ def search_atoms(query: str, project: str = "", limit: int = 5):
 
     results = []
     for aid, atype, content, meta, docid, source, vno, rank in rows:
-        page = (meta or {}).get("page", "?")
+        page = (meta or {}).get("page") or "?"
         # Подтягиваем связанные атомы (atom_links) — таблицы/схемы по ссылкам
         linked = []
         cur.execute("""

@@ -1,42 +1,53 @@
 #!/usr/bin/env python3
-"""Импорт одного файла в разные проекты. БД — тестовая, LLM не вызывается.
+"""Импорт одного файла в разные проекты.
 
-Кейсы: тот же файл в другой проект, изменённый файл в другой проект,
-новый файл в новый проект. В первых двух — ноль вызовов LLM и ни одного
-пустого проекта.
+База берётся только из TEST_PG_DSN, никогда из PG_DSN: тест очищает таблицы,
+и на рабочей базе это уничтожило бы данные. Шрифт — встроенный с кириллицей,
+иначе текст превращается в точки и атомов не получается.
 """
-import importlib
 import os
 import sys
 import tempfile
+import unittest
 
 import psycopg2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import import_document as im  # noqa: E402
 
-DSN = os.environ.get("PG_DSN")
-calls = {"n": 0}
+DSN = os.environ.get("TEST_PG_DSN")
+CALLS = {"n": 0}
 
 
-def fake_enrich(batch, doc_title="", prev_tail=""):
-    calls["n"] += 1
+def _fake_enrich(batch, doc_title="", prev_tail=""):
+    CALLS["n"] += 1
     return [{**a, "metadata": {"tags": ["тест"], "page": a.get("page")}} for a in batch]
 
 
-def reset():
-    conn = psycopg2.connect(DSN)
+def _pdf(path, text):
+    import fitz
+    doc = fitz.open()
+    page = doc.new_page()
+    # times-roman кириллицу не содержит — текст превращался в точки и атомов
+    # не получалось. cjk её содержит.
+    writer = fitz.TextWriter(page.rect)
+    writer.append((50, 100), text + " " + ("слово " * 40), font=fitz.Font("cjk"))
+    writer.write_text(page)
+    doc.save(path)
+    doc.close()
+
+
+def _wipe():
+    conn = psycopg2.connect(os.environ["PG_DSN"])
     cur = conn.cursor()
-    for table in ("atom_links", "journal", "atoms", "versions", "sources", "projects"):
-        cur.execute(f"DELETE FROM {table}")
+    cur.execute("TRUNCATE atom_links, journal, atoms, versions, sources, projects CASCADE")
     conn.commit()
     cur.close()
     conn.close()
-    calls["n"] = 0
 
 
-def projects():
-    conn = psycopg2.connect(DSN)
+def _projects():
+    conn = psycopg2.connect(os.environ["PG_DSN"])
     cur = conn.cursor()
     cur.execute("SELECT name FROM projects ORDER BY name")
     rows = [r[0] for r in cur.fetchall()]
@@ -45,61 +56,51 @@ def projects():
     return rows
 
 
-def run():
-    im.enrich_batch = fake_enrich
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as fh:
-        path = fh.name
-    try:
+@unittest.skipUnless(DSN, "TEST_PG_DSN не задан — тест работает только на отдельной базе")
+class ProjectConflictTests(unittest.TestCase):
+    def setUp(self):
+        os.environ["PG_DSN"] = DSN
+        import importlib
+        importlib.reload(im)
+        im.enrich_batch = _fake_enrich
+        CALLS["n"] = 0
+        _wipe()
+
+    def test_same_file_other_project_makes_no_llm_call(self):
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as fh:
+            path = fh.name
         _pdf(path, "Документ А")
-        reset()
-
         im.import_doc(path, "alpha")
-        assert projects() == ["alpha"], projects()
-
-        # тот же файл в другой проект: ошибка до LLM, проектов не прибавляется
-        before = calls["n"]
-        try:
+        before = CALLS["n"]
+        self.assertGreater(before, 0, "первый импорт не вызвал обогащение")
+        with self.assertRaises(SystemExit):
             im.import_doc(path, "beta")
-            raise AssertionError("ожидалась ошибка")
-        except SystemExit as e:
-            assert "alpha" in str(e), e
-        assert calls["n"] == before, "LLM вызвался зря"
-        assert projects() == ["alpha"], projects()
+        self.assertEqual(CALLS["n"], before)
+        self.assertEqual(_projects(), ["alpha"])
+        os.unlink(path)
 
-        # изменённый файл в другой проект: тоже ошибка, версии не плодятся
+    def test_changed_file_other_project_does_not_mix_versions(self):
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as fh:
+            path = fh.name
+        _pdf(path, "Документ А")
+        im.import_doc(path, "alpha")
         _pdf(path, "Документ А, редакция 2")
-        before = calls["n"]
-        try:
+        before = CALLS["n"]
+        with self.assertRaises(SystemExit):
             im.import_doc(path, "beta")
-            raise AssertionError("ожидалась ошибка на изменённом файле")
-        except SystemExit:
-            pass
-        assert calls["n"] == before
-        assert projects() == ["alpha"], projects()
+        self.assertEqual(CALLS["n"], before)
+        self.assertEqual(_projects(), ["alpha"])
+        os.unlink(path)
 
-        # новый файл в новый проект — проходит
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as fh2:
-            path2 = fh2.name
-        _pdf(path2, "Документ Б")
-        im.import_doc(path2, "beta")
-        assert projects() == ["alpha", "beta"], projects()
-        os.unlink(path2)
-        print("ok  project conflicts")
-    finally:
+    def test_new_file_new_project(self):
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as fh:
+            path = fh.name
+        _pdf(path, "Документ Б")
+        im.import_doc(path, "gamma")
+        self.assertGreater(CALLS["n"], 0)
+        self.assertEqual(_projects(), ["gamma"])
         os.unlink(path)
 
 
-def _pdf(path, text):
-    import fitz
-    doc = fitz.open()
-    page = doc.new_page()
-    page.insert_text((50, 100), text + " " + ("слово " * 40))
-    doc.save(path)
-    doc.close()
-
-
 if __name__ == "__main__":
-    if not DSN:
-        print("skip: PG_DSN не задан")
-        sys.exit(0)
-    run()
+    unittest.main()
