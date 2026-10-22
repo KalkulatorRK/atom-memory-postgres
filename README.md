@@ -20,7 +20,7 @@ A self-contained **Hermes skill** (schema + scripts + deployment procedure) that
 Download the archive from the [latest release](https://github.com/KalkulatorRK/atom-memory-postgres/releases) and unpack it into the skills directory:
 
 ```bash
-curl -L -o ~/atom-memory-skill.tar.gz https://github.com/KalkulatorRK/atom-memory-postgres/releases/download/v1.0.0/atom-memory-postgres-skill.tar.gz
+curl -L -o ~/atom-memory-skill.tar.gz https://github.com/KalkulatorRK/atom-memory-postgres/releases/latest/download/atom-memory-postgres-skill.tar.gz
 tar -xzf ~/atom-memory-skill.tar.gz -C ~/.hermes/skills/
 # → ~/.hermes/skills/data-science/atom-memory-postgres/
 ```
@@ -34,6 +34,9 @@ hermes skills install https://raw.githubusercontent.com/KalkulatorRK/atom-memory
 > ⚠️ The built-in security scanner (tirith) may block this skill from *community sources* because its setup script legitimately uses `sudo apt` / `pip install` to provision PostgreSQL. That is a false positive for a provisioning skill — use Option A, or review and trust the source yourself.
 
 ---
+
+
+> **What is and is not implemented.** Search is full-text (`ru_en` stemming) plus an ILIKE fallback. The `embeddings` table and the pgvector badge are a placeholder: no script writes or reads vectors yet. The `journal` table records imports. Document text is sent to an external LLM only when `LLM_API_KEY` is set; without it import works and atoms simply have no tags.
 
 ## Why
 

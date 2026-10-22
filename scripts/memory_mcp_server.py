@@ -8,12 +8,15 @@
 
 Локальный stdio MCP-сервер. Регистрация в Hermes:
   hermes config set mcp_servers.memory.command "python3"
-  hermes config set mcp_servers.memory.args '["/home/hermesadm/.hermes/scripts/memory_mcp_server.py"]'
+  hermes config set mcp_servers.memory.args '["scripts/memory_mcp_server.py"]'
 """
 import json
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _common import fts_query
 
 PG_DSN = os.environ.get("PG_DSN") or ""
 
@@ -25,15 +28,6 @@ def get_pg():
     return psycopg2.connect(PG_DSN)
 
 
-def fts_query(q: str) -> str:
-    """Преобразует свободный запрос в tsquery (русские стемминги + AND)."""
-    words = re.findall(r"[\wа-яё-]{3,}", q.lower(), re.UNICODE)
-    words = [w for w in words if w not in ("что", "как", "какие", "какой", "по", "для", "при")]
-    if not words:
-        return "''"
-    return " & ".join(words)
-
-
 def search_atoms(query: str, project: str = "", limit: int = 5):
     conn = get_pg()
     cur = conn.cursor()
@@ -42,13 +36,13 @@ def search_atoms(query: str, project: str = "", limit: int = 5):
     sql = """
         SELECT a.id, a.atom_type, a.content, a.metadata, a.document_id,
                s.title AS source, v.version_no,
-               ts_rank(to_tsvector('ru_en', a.content), to_tsquery('ru_en', %s)) AS rank
+               ts_rank(to_tsvector('public.ru_en', a.content), to_tsquery('public.ru_en', %s)) AS rank
         FROM atoms a
         JOIN versions v ON a.version_id = v.id
         JOIN sources s ON a.document_id = s.id
         JOIN projects p ON s.project_id = p.id
         WHERE a.status = 'active'
-          AND to_tsvector('ru_en', a.content) @@ to_tsquery('ru_en', %s)
+          AND to_tsvector('public.ru_en', a.content) @@ to_tsquery('public.ru_en', %s)
     """
     params = [tq, tq]
     if project:
@@ -124,7 +118,7 @@ def stats():
     links = cur.fetchone()[0]
     cur.execute("SELECT count(DISTINCT version_id) FROM atoms")
     versions = cur.fetchone()[0]
-    cur.execute("SELECT pg_size_pretty(pg_database_size('memory'))")
+    cur.execute("SELECT pg_size_pretty(pg_database_size(current_database()))")
     size = cur.fetchone()[0]
     cur.close()
     conn.close()

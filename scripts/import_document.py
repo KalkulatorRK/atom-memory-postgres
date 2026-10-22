@@ -33,16 +33,20 @@ def get_pg():
     return psycopg2.connect(PG_DSN)
 
 
-def pdf_to_text(pdf_path: str) -> str:
-    """Шаг 1: PDF → текст постранично (pymupdf; Docling не тянет на слабом VPS)."""
+def pdf_to_pages(pdf_path: str):
+    """Шаг 1: PDF → список (номер_страницы, текст). Документ закрывается."""
     import fitz
     doc = fitz.open(pdf_path)
-    parts = []
-    for page in doc:
-        text = page.get_text()
-        if text.strip():
-            parts.append(f"<!-- страница {page.number + 1} -->\n{text}")
-    return "\n\n".join(parts)
+    try:
+        return [(page.number + 1, page.get_text()) for page in doc]
+    finally:
+        doc.close()
+
+
+def pdf_to_text(pdf_path: str) -> str:
+    """Совместимость: текст всех страниц одной строкой с маркерами страниц."""
+    return "\n\n".join(
+        f"<!-- страница {n} -->\n{t}" for n, t in pdf_to_pages(pdf_path) if t.strip())
 
 
 def normalize_text(md: str) -> str:
@@ -81,7 +85,20 @@ def smart_split(text: str):
     sentences = re.split(r'(?<=[.!?])\s+|\n\n', text)
     atoms = []
     current = ""
+    page = None
     ordinal = 0
+
+    def page_of(fragment):
+        marks = re.findall(r'<!-- страница (\d+) -->', fragment)
+        return int(marks[-1]) if marks else None
+
+    def emit(buf):
+        nonlocal ordinal, page
+        atoms.append({"ordinal": ordinal, "content": buf, "atom_type": "text",
+                      "page": page_of(buf) or page})
+        page = page_of(buf) or page
+        ordinal += 1
+
     for sent in sentences:
         sent = sent.strip()
         if not sent:
@@ -89,19 +106,17 @@ def smart_split(text: str):
         if len(current) + len(sent) <= CHUNK_MAX or not current:
             current = current + (" " if current else "") + sent
         else:
-            atoms.append({"ordinal": ordinal, "content": current,
-                          "atom_type": "text"})
-            ordinal += 1
+            emit(current)
             current = sent
     if current:
-        atoms.append({"ordinal": ordinal, "content": current, "atom_type": "text"})
-        ordinal += 1
+        emit(current)
 
     # Финальная проверка: атомы меньше CHUNK_MIN — мёрджим с соседом
     merged = []
     for a in atoms:
         if merged and len(a["content"]) < CHUNK_MIN and len(merged[-1]["content"]) + len(a["content"]) < CHUNK_MAX * 1.5:
             merged[-1]["content"] += " " + a["content"]
+            merged[-1]["page"] = merged[-1].get("page") or a.get("page")
         else:
             merged.append(a)
     return merged
@@ -113,8 +128,12 @@ def extract_tables_images(pdf_path: str):
     Возвращает (tables_atoms, images_atoms).
     """
     import fitz
+    import hashlib as _hashlib
     doc = fitz.open(pdf_path)
     os.makedirs(ASSETS_DIR, exist_ok=True)
+    # Префикс документа: без него картинки разных PDF затирали друг друга
+    # в общем каталоге (имя было img_p{страница}_{xref}.png).
+    doc_key = _hashlib.sha256(os.path.abspath(pdf_path).encode()).hexdigest()[:10]
     tables = []
     images = []
     seen_figs = set()
@@ -136,18 +155,10 @@ def extract_tables_images(pdf_path: str):
                     md_rows.append("| " + " | ".join(str(c).replace("|", "/").strip() if c else "" for c in row) + " |")
                 content = "\n".join(md_rows)
 
-                # Ищем номер: «Таблица N — ...» выше таблицы (в тексте страницы)
-                table_no = None
-                m = re.search(r'Таблица\s+([0-9А-Яа-я]+)', page_text)
-                if m:
-                    table_no = m.group(1)
-
-                # Заголовок — строка после «Таблица N»
-                title = ""
-                if table_no:
-                    m2 = re.search(r'Таблица\s+' + re.escape(table_no) + r'\s*[—–-]\s*([^\n]+)', page_text)
-                    if m2:
-                        title = m2.group(1).strip()
+                # Номер берём из подписи прямо над таблицей, а не из первого
+                # совпадения на странице: иначе все таблицы страницы получали
+                # номер первой.
+                table_no, title = _nearest_caption(page, t.bbox, "table")
 
                 tables.append({
                     "ordinal": 0,
@@ -171,15 +182,11 @@ def extract_tables_images(pdf_path: str):
                 pix = fitz.Pixmap(doc, xref)
                 if pix.n > 4:
                     pix = fitz.Pixmap(fitz.csRGB, pix)
-                fname = f"img_p{pno+1}_{xref}.png"
+                fname = f"{doc_key}_p{pno+1}_{xref}.png"
                 fpath = os.path.join(ASSETS_DIR, fname)
                 pix.save(fpath)
 
-                # Ищем подпись «рис. N» / «Рисунок N» / «Схема N» на странице
-                fig_no = None
-                m = re.search(r'(?:рис\.|Рисунок|рисунок|Схема|схема)\s*([0-9А-Яа-я]+)', page_text)
-                if m:
-                    fig_no = f"рис. {m.group(1)}"
+                fig_no, _cap = _nearest_caption(page, pix.irect, "figure")
 
                 images.append({
                     "ordinal": 0,
@@ -192,7 +199,42 @@ def extract_tables_images(pdf_path: str):
         except Exception as e:
             pass
 
+    doc.close()
     return tables, images
+
+
+def _nearest_caption(page, bbox, kind):
+    """Подпись ближайшая к объекту: над ним для таблиц, под ним для рисунков.
+
+    kind='table' ищет «Таблица N», kind='figure' — «рис. N» / «Рисунок N».
+    Возвращает (номер, заголовок). Номер в том виде, как в документе.
+    """
+    if kind == "table":
+        rx = re.compile(r'Таблица\s+([0-9]+(?:\.[0-9]+)?|[А-Яа-яA-Za-z](?:\.[0-9]+)?)'
+                        r'(?:\s*[—–-]\s*([^\n]+))?')
+        above = True
+    else:
+        rx = re.compile(r'(?:рис\.|Рисунок|рисунок|Схема|схема)\s*'
+                        r'([0-9]+(?:\.[0-9]+)?|[А-Яа-яA-Za-z](?:\.[0-9]+)?)')
+        above = False
+    best, best_gap = None, None
+    for b in page.get_text("blocks"):
+        x0, y0, x1, y1, text = b[:5]
+        m = rx.search(text or "")
+        if not m:
+            continue
+        gap = (bbox[1] - y1) if above else (y0 - bbox[3])
+        if gap < -5:
+            continue
+        if best_gap is None or gap < best_gap:
+            best, best_gap = m, gap
+    if not best:
+        return None, ""
+    number = best.group(1)
+    if kind == "figure":
+        number = f"рис. {number}"
+    title = best.group(2).strip() if kind == "table" and best.lastindex and best.lastindex >= 2 and best.group(2) else ""
+    return number, title
 
 
 def quality_gate(atoms):
@@ -206,7 +248,9 @@ def quality_gate(atoms):
         if len(content) < 30 or len(letters) < 10:
             dropped += 1
             continue
-        # Смесь блоков с маркером страницы в середине → оставляем (маркер уберём)
+        marks = re.findall(r'<!-- страница (\d+) -->', content)
+        if marks and not a.get("page"):
+            a["page"] = int(marks[0])
         content = re.sub(r'<!-- страница \d+ -->\s*', '', content)
         a["content"] = content
         clean.append(a)
@@ -341,6 +385,7 @@ def import_doc(pdf_path, project_name):
         all_atoms.append(im)
     for a in text_atoms:
         a["ordinal"] = len(all_atoms)
+        a["metadata_hint"] = {"page": a.get("page")}
         all_atoms.append(a)
 
     print(f"      Всего атомов: {len(all_atoms)}")
@@ -402,7 +447,8 @@ def import_doc(pdf_path, project_name):
             for atom in batches[bi]:
                 enriched.append({**atom, "metadata": {
                     "tags": [], "entities": [], "summary": atom["content"][:80],
-                    "atom_type": atom["atom_type"], "source_doc": doc_title}})
+                    "atom_type": atom["atom_type"], "page": atom.get("page"),
+                    "source_doc": doc_title}})
     print(f"      Обогащено: {len(enriched)} атомов")
 
     print(f"[4/4] Запись в PostgreSQL + atom_links...")
@@ -417,12 +463,23 @@ def import_doc(pdf_path, project_name):
         cur.execute("INSERT INTO projects (name) VALUES (%s) RETURNING id", (project_name,))
         project_id = cur.fetchone()[0]
 
-    sha = hashlib.sha256(open(pdf_path, 'rb').read()).hexdigest()
+    pdf_path = os.path.abspath(pdf_path)
+    with open(pdf_path, 'rb') as fh:
+        sha = hashlib.sha256(fh.read()).hexdigest()
     size = os.path.getsize(pdf_path)
-    cur.execute("SELECT id FROM sources WHERE location = %s", (pdf_path,))
+    cur.execute("SELECT id, content_sha FROM sources WHERE location = %s", (pdf_path,))
     row = cur.fetchone()
+    if row and row[1] == sha:
+        # Файл не изменился — новую версию не плодим, атомы не трогаем.
+        conn.rollback()
+        cur.close()
+        conn.close()
+        print(f"      Без изменений (sha совпал), импорт пропущен")
+        return 0, 0
     if row:
         source_id = row[0]
+        cur.execute("UPDATE sources SET content_sha = %s, content_size = %s WHERE id = %s",
+                    (sha, size, source_id))
         cur.execute("SELECT COALESCE(MAX(version_no), 0) FROM versions WHERE source_id = %s", (source_id,))
         version_no = cur.fetchone()[0] + 1
         cur.execute("UPDATE atoms SET status = 'superseded' WHERE version_id IN "
@@ -477,9 +534,11 @@ def import_doc(pdf_path, project_name):
                 continue
             # Ищем атом-цель по table_no / fig_no в метаданных
             cur.execute(
-                "SELECT id FROM atoms WHERE version_id=%s AND status='active' AND "
-                "(metadata->>'table_no' = %s OR metadata->>'fig_no' = %s) LIMIT 1",
-                (version_id, target, target))
+                "SELECT id FROM atoms WHERE version_id=%s AND status='active' AND ("
+                "lower(metadata->>'table_no') = lower(%s) OR "
+                "lower(metadata->>'fig_no') = lower(%s) OR "
+                "lower(metadata->>'fig_no') = lower('рис. ' || %s)) LIMIT 1",
+                (version_id, target, target, target))
             row = cur.fetchone()
             if row:
                 try:
@@ -487,10 +546,15 @@ def import_doc(pdf_path, project_name):
                         "INSERT INTO atom_links (from_atom, to_atom, rel_type) VALUES (%s, %s, %s) "
                         "ON CONFLICT DO NOTHING",
                         (from_id, row[0], f"references_{rtype}"))
-                    links += 1
+                    links += cur.rowcount
                 except Exception:
                     pass
 
+    cur.execute(
+        "INSERT INTO journal (op_type, details) VALUES ('import', %s::jsonb)",
+        (json.dumps({"source_id": source_id, "version_id": version_id,
+                     "version_no": version_no, "atoms": len(enriched),
+                     "file": os.path.basename(pdf_path)}, ensure_ascii=False),))
     conn.commit()
     cur.close()
     conn.close()
@@ -499,7 +563,7 @@ def import_doc(pdf_path, project_name):
     # Нормализация перекрёстных ссылок (3 стратегии: точное/префиксное/текст)
     try:
         from normalize_links import resolve_links
-        n_links = resolve_links(version_no)
+        n_links = resolve_links(version_id)
         links += n_links
         print(f"      Нормализация: +{n_links} ссылок (итого {links})")
     except ImportError:

@@ -20,7 +20,7 @@
 Скачать архив из [последнего релиза](https://github.com/KalkulatorRK/atom-memory-postgres/releases) и распаковать в каталог скиллов:
 
 ```bash
-curl -L -o ~/atom-memory-skill.tar.gz https://github.com/KalkulatorRK/atom-memory-postgres/releases/download/v1.0.0/atom-memory-postgres-skill.tar.gz
+curl -L -o ~/atom-memory-skill.tar.gz https://github.com/KalkulatorRK/atom-memory-postgres/releases/latest/download/atom-memory-postgres-skill.tar.gz
 tar -xzf ~/atom-memory-skill.tar.gz -C ~/.hermes/skills/
 # → ~/.hermes/skills/data-science/atom-memory-postgres/
 ```
@@ -34,6 +34,9 @@ hermes skills install https://raw.githubusercontent.com/KalkulatorRK/atom-memory
 > ⚠️ Встроенный сканер безопасности (tirith) может заблокировать установку этого скилла из community-источника: скрипт развёртывания легально использует `sudo apt` / `pip install` для подготовки PostgreSQL. Это ложное срабатывание для установочного скилла — используйте вариант A или проверьте источник и доверьтесь ему самостоятельно.
 
 ---
+
+
+> **Что работает, а что нет.** Поиск — полнотекстовый (`ru_en`) плюс запасной ILIKE. Таблица `embeddings` и бейдж pgvector — заготовка: ни один скрипт туда не пишет и оттуда не читает. `journal` ведётся, импорт пишет в него строку. Текст документов уходит внешнему LLM только если задан `LLM_API_KEY`; без ключа импорт работает, атомы просто остаются без тегов.
 
 ## Зачем
 

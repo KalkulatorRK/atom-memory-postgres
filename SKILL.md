@@ -64,7 +64,7 @@ EOF
 psql "postgresql://hermes:пароль@localhost:5432/memory" -f references/schema.sql
 ```
 
-Таблицы: `projects → sources → versions → atoms` + `atom_links` + `embeddings` (опц.) + `journal`. Индексы: GIN по `metadata`, GIN FTS `to_tsvector('ru_en', content)` (RU+EN морфология), `idx_links_to`.
+Таблицы: `projects → sources → versions → atoms` + `atom_links` + `embeddings` (опц.) + `journal`. Индексы: GIN по `metadata`, GIN FTS `to_tsvector('public.ru_en', content)` (RU+EN морфология), `idx_links_to`.
 
 ### 4. Переменные окружения
 
@@ -115,7 +115,10 @@ python3 scripts/memory_query.py "метод контроля" --project "my-proj
   - битые `atom_links` (`to_atom` не найден) → пересоздать;
   - атомы без тегов, начинающиеся с середины слова → проблема резки, не LLM;
   - осиротевшие атомы (0 запросов за N дней) → кандидаты на удаление.
-- Журнал операций — таблица `journal` (кто/что/когда импортировал).
+- Журнал операций — таблица `journal`: `import_document.py` пишет строку на каждый импорт.
+- Страница хранится в `metadata.page` у атомов всех типов, включая текст.
+- `embeddings` и pgvector в схеме есть, но векторный поиск не реализован — поиск это FTS.
+- Дополнительные индексы (хранимый `tsv`, pg_trgm) — `references/migrations/0002_indexes.sql`, применять отдельно.
 
 ## Common Pitfalls
 

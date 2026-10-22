@@ -1,0 +1,5 @@
+# Зависимости скриптов атомной памяти.
+# MCP-сервер (scripts/memory_mcp_server.py) дополнительно требует пакет mcp.
+pymupdf>=1.24
+psycopg2-binary>=2.9
+requests>=2.31

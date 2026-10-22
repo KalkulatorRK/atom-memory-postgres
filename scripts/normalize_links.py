@@ -35,17 +35,20 @@ def normalize_fig_no(target):
     return m.group(1).lower() if m else target.lower()
 
 
-def resolve_links(version_no):
+def resolve_links(version_id):
+    """Резолвит ссылки внутри ОДНОЙ версии документа (version_id, не номер).
+
+    Раньше отбор шёл по version_no, и «Таблица 5» документа A привязывалась
+    к таблице 5 документа B, если номера версий совпадали.
+    """
     conn = get_pg()
     cur = conn.cursor()
 
-    # 1. Собираем все активные атомы версии
     cur.execute("""
         SELECT a.id, a.atom_type, a.content, a.metadata
         FROM atoms a
-        JOIN versions v ON a.version_id = v.id
-        WHERE v.version_no = %s AND a.status = 'active'
-    """, (version_no,))
+        WHERE a.version_id = %s AND a.status = 'active'
+    """, (version_id,))
     atoms = cur.fetchall()
 
     # Индексы: table_no/fig_no → id (с нормализацией)
@@ -118,12 +121,13 @@ def resolve_links(version_no):
     conn.commit()
     cur.close()
     conn.close()
-    print(f"✅ Нормализовано ссылок для v{version_no}: создано {created}")
+    print(f"✅ Нормализовано ссылок для version_id={version_id}: создано {created}")
     return created
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", type=int, default=6)
+    parser.add_argument("--version-id", type=int, required=True,
+                        help="id строки в versions, не порядковый номер версии")
     args = parser.parse_args()
-    resolve_links(args.version)
+    resolve_links(args.version_id)

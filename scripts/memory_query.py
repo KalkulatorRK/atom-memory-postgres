@@ -17,6 +17,8 @@ import sys
 
 import psycopg2
 
+from _common import fts_query
+
 
 def get_dsn():
     dsn = os.environ.get("PG_DSN")
@@ -39,13 +41,6 @@ STOPWORDS = {
 }
 
 
-def fts_query(q: str) -> str:
-    """Русские стемы + AND (как в memory_mcp_server.py)."""
-    words = re.findall(r"[а-яёa-z]{3,}", q.lower(), re.UNICODE)
-    words = [w for w in words if w not in STOPWORDS]
-    return " & ".join(words) or "''"
-
-
 def terms_for_ili(q: str):
     """Значимые токены для ILIKE, включая числа (2+ символа)."""
     toks = re.findall(r"[а-яёa-z0-9.-]{2,}", q.lower(), re.UNICODE)
@@ -66,12 +61,12 @@ def main():
     sql = """
         SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source,
                v.version_no,
-               ts_rank(to_tsvector('ru_en', a.content), to_tsquery('ru_en', %s)) AS rank
+               ts_rank(to_tsvector('public.ru_en', a.content), to_tsquery('public.ru_en', %s)) AS rank
         FROM atoms a
         JOIN versions v ON a.version_id = v.id
         JOIN sources s ON a.document_id = s.id
         WHERE a.status = 'active'
-          AND to_tsvector('ru_en', a.content) @@ to_tsquery('ru_en', %s)
+          AND to_tsvector('public.ru_en', a.content) @@ to_tsquery('public.ru_en', %s)
     """
     params = [tq, tq]
     if args.project:
@@ -83,15 +78,16 @@ def main():
     cur.execute(sql, params)
     rows = cur.fetchall()
 
-    if len(rows) < 2:
-        # Fallback: ILIKE по значимым токенам (числа FTS не ловит)
+    if len(rows) < args.limit:
+        # Добираем ILIKE-выдачей (числа FTS не ловит), но уже найденное не выбрасываем.
+        seen = {r[0] for r in rows}
         terms = terms_for_ili(args.query)
         if terms:
             cond = " OR ".join(["a.content ILIKE '%%' || %s || '%%'" for _ in terms])
             cur.execute(
                 """
-                SELECT a.id, a.atom_type, left(a.content, 400), (a.metadata->>'page') AS page,
-                       s.title AS source, v.version_no
+                SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source,
+                       v.version_no, 0 AS rank
                 FROM atoms a
                 JOIN versions v ON a.version_id = v.id
                 JOIN sources s ON a.document_id = s.id
@@ -100,11 +96,9 @@ def main():
                 """ % (cond, "%s"),
                 terms + [args.limit],
             )
-            rows = cur.fetchall()
-            for aid, atype, content, page, source, vno in rows:
-                print(f"[{aid}] {source} v{vno} стр.{page} ({atype}) {content}")
-            cur.close(); conn.close()
-            return
+            for r in cur.fetchall():
+                if r[0] not in seen and len(rows) < args.limit:
+                    rows.append(r)
 
     for aid, atype, content, meta, source, vno, rank in rows:
         page = (meta or {}).get("page", "?")

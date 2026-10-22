@@ -27,8 +27,8 @@ def main():
     conn = get_pg()
     cur = conn.cursor()
 
-    cur.execute("SELECT MAX(version_no) FROM versions WHERE source_id = %s", (args.source,))
-    vno = cur.fetchone()[0]
+    cur.execute("SELECT id, version_no FROM versions WHERE source_id = %s ORDER BY version_no DESC LIMIT 1", (args.source,))
+    version_id, vno = cur.fetchone()
     cur.execute("SELECT title FROM sources WHERE id = %s", (args.source,))
     doc_title = cur.fetchone()[0]
 
@@ -36,12 +36,12 @@ def main():
         """
         SELECT a.id, a.ordinal, a.content
         FROM atoms a JOIN versions v ON a.version_id = v.id
-        WHERE v.source_id = %s AND v.version_no = %s AND a.atom_type = 'text'
+        WHERE a.version_id = %s AND a.atom_type = 'text'
           AND NOT (jsonb_typeof(a.metadata -> 'tags') = 'array'
                    AND jsonb_array_length(a.metadata -> 'tags') > 0)
         ORDER BY a.ordinal
         """,
-        (args.source, vno),
+        (version_id,),
     )
     rows = cur.fetchall()
     print(f"Источник #{args.source} v{vno}: не размеченных текст-атомов: {len(rows)}")
@@ -87,7 +87,7 @@ def main():
     conn.close()
     print(f"Обновлено атомов: {updated}")
     if updated:
-        print(f"Затем: ~/hermes-env/bin/python3 ~/.hermes/scripts/normalize_links.py --version {vno}")
+        print(f"Затем: python3 scripts/normalize_links.py --version-id {version_id}")
 
 
 if __name__ == "__main__":
