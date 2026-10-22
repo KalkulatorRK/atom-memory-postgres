@@ -16,7 +16,7 @@ import sys
 import time
 
 # ===== Конфигурация =====
-PG_DSN = os.environ.get("PG_DSN", "postgresql://hermes:hermes_memory_2026@localhost:5432/memory")
+PG_DSN = os.environ.get("PG_DSN") or ""
 CHUNK_MIN = 300          # мин. символов на атом
 CHUNK_TARGET = 400       # целевой размер
 CHUNK_MAX = 500          # макс. (до границы предложения)
@@ -28,6 +28,8 @@ ASSETS_DIR = os.path.expanduser(os.environ.get("MEMORY_ASSETS_DIR", "~/memory_im
 
 def get_pg():
     import psycopg2
+    if not PG_DSN:
+        raise SystemExit("PG_DSN не задан: export PG_DSN=postgresql://user:pass@host:5432/db")
     return psycopg2.connect(PG_DSN)
 
 

@@ -23,9 +23,9 @@ SET row_security = off;
 
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 -- Мультиязычная конфигурация FTS: кириллица -> russian_stem, латиница -> english_stem
-CREATE TEXT SEARCH CONFIGURATION ru_en (COPY = simple);
-ALTER TEXT SEARCH CONFIGURATION ru_en ALTER MAPPING FOR asciiword, asciihword, hword_asciipart WITH english_stem;
-ALTER TEXT SEARCH CONFIGURATION ru_en ALTER MAPPING FOR word, hword, hword_part WITH russian_stem;
+CREATE TEXT SEARCH CONFIGURATION public.ru_en (COPY = simple);
+ALTER TEXT SEARCH CONFIGURATION public.ru_en ALTER MAPPING FOR asciiword, asciihword, hword_asciipart WITH english_stem;
+ALTER TEXT SEARCH CONFIGURATION public.ru_en ALTER MAPPING FOR word, hword, hword_part WITH russian_stem;
 
 
 
@@ -419,7 +419,7 @@ ALTER TABLE ONLY public.versions
 -- Name: idx_atoms_fts; Type: INDEX; Schema: public; Owner: postgres
 --
 
-CREATE INDEX idx_atoms_fts ON public.atoms USING gin (to_tsvector('ru_en'::regconfig, content));
+CREATE INDEX idx_atoms_fts ON public.atoms USING gin (to_tsvector('public.ru_en'::regconfig, content));
 
 
 --
@@ -517,130 +517,3 @@ ALTER TABLE ONLY public.sources
 
 ALTER TABLE ONLY public.versions
     ADD CONSTRAINT versions_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.sources(id) ON DELETE CASCADE;
-
-
---
--- Name: SCHEMA public; Type: ACL; Schema: -; Owner: pg_database_owner
---
-
-GRANT USAGE ON SCHEMA public TO hermes;
-
-
---
--- Name: TABLE atom_links; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON TABLE public.atom_links TO hermes;
-
-
---
--- Name: SEQUENCE atom_links_id_seq; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON SEQUENCE public.atom_links_id_seq TO hermes;
-
-
---
--- Name: TABLE atoms; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON TABLE public.atoms TO hermes;
-
-
---
--- Name: SEQUENCE atoms_id_seq; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON SEQUENCE public.atoms_id_seq TO hermes;
-
-
---
--- Name: TABLE embeddings; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON TABLE public.embeddings TO hermes;
-
-
---
--- Name: SEQUENCE embeddings_id_seq; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON SEQUENCE public.embeddings_id_seq TO hermes;
-
-
---
--- Name: TABLE journal; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON TABLE public.journal TO hermes;
-
-
---
--- Name: SEQUENCE journal_id_seq; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON SEQUENCE public.journal_id_seq TO hermes;
-
-
---
--- Name: TABLE projects; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON TABLE public.projects TO hermes;
-
-
---
--- Name: SEQUENCE projects_id_seq; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON SEQUENCE public.projects_id_seq TO hermes;
-
-
---
--- Name: TABLE sources; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON TABLE public.sources TO hermes;
-
-
---
--- Name: SEQUENCE sources_id_seq; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON SEQUENCE public.sources_id_seq TO hermes;
-
-
---
--- Name: TABLE versions; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON TABLE public.versions TO hermes;
-
-
---
--- Name: SEQUENCE versions_id_seq; Type: ACL; Schema: public; Owner: postgres
---
-
-GRANT ALL ON SEQUENCE public.versions_id_seq TO hermes;
-
-
---
--- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: public; Owner: postgres
---
-
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON SEQUENCES TO hermes;
-
-
---
--- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: public; Owner: postgres
---
-
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT ALL ON TABLES TO hermes;
-
-
---
--- PostgreSQL database dump complete
---
-
-\unrestrict qiC4WJWJSatzAAqlp1h01xtJIKjPW9dS02MxFvNXgTlnsaxuvsjFafadGcObmVO
-

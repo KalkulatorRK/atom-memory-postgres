@@ -15,14 +15,13 @@ import os
 import re
 import sys
 
-PG_DSN = os.environ.get(
-    "PG_DSN",
-    "postgresql://hermes:hermes_memory_2026@localhost:5432/memory",
-)
+PG_DSN = os.environ.get("PG_DSN") or ""
 
 
 def get_pg():
     import psycopg2
+    if not PG_DSN:
+        raise SystemExit("PG_DSN не задан: export PG_DSN=postgresql://user:pass@host:5432/db")
     return psycopg2.connect(PG_DSN)
 
 
