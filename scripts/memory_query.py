@@ -17,7 +17,7 @@ import sys
 
 import psycopg2
 
-from _common import fts_query
+from _common import fts_query, ili_terms
 
 
 def get_dsn():
@@ -31,20 +31,6 @@ def get_dsn():
                 if line.startswith("PG_DSN="):
                     return line.strip().split("=", 1)[1]
     raise SystemExit("PG_DSN не найден ни в окружении, ни в ~/.hermes/.env")
-
-
-STOPWORDS = {
-    "что", "как", "какие", "какой", "какая", "по", "для", "при", "это",
-    "означает", "означают", "значит", "номер", "цифры", "цифра",
-    "the", "and", "for", "with", "from", "this", "that", "are",
-    "was", "not", "have", "been", "were", "will",
-}
-
-
-def terms_for_ili(q: str):
-    """Значимые токены для ILIKE, включая числа (2+ символа)."""
-    toks = re.findall(r"[а-яёa-z0-9.-]{2,}", q.lower(), re.UNICODE)
-    return [t for t in toks if t not in STOPWORDS][:4]
 
 
 def main():
@@ -105,29 +91,23 @@ def main():
                 if r[0] not in seen and len(rows) < args.limit:
                     rows.append(r)
 
+    # Связанные атомы — одним запросом на всю выдачу, не N+1
+    from _common import linked_by_atom
+    linked_map = linked_by_atom(cur, [r[0] for r in rows])
     for aid, atype, content, meta, source, vno, rank in rows:
         page = (meta or {}).get("page") or "?"
         tags = (meta or {}).get("tags", [])
         print(f"[{aid}] {source} v{vno} стр.{page} ({atype}) {content[:400]}")
         if tags:
             print(f"    теги: {', '.join(tags[:8])}")
-        # Связанные атомы: таблицы/схемы по atom_links
-        cur.execute(
-            """
-            SELECT t.atom_type, left(t.content, 200), t.metadata
-            FROM atom_links l JOIN atoms t ON l.to_atom = t.id
-            WHERE l.from_atom = %s AND t.status = 'active' LIMIT 3
-            """,
-            (aid,),
-        )
-        for ttype, tcontent, tmeta in cur.fetchall():
+        for ttype, tcontent, tmeta in linked_map.get(aid, []):
             loc = ""
             if tmeta:
                 if tmeta.get("table_no"):
                     loc = f" табл.{tmeta['table_no']}"
                 elif tmeta.get("fig_no"):
                     loc = f" {tmeta['fig_no']}"
-            print(f"    ↳ {ttype}{loc}: {tcontent}")
+            print(f"    ↳ {ttype}{loc}: {tcontent[:200]}")
         print()
 
     cur.close()

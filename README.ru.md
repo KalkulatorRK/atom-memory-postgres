@@ -61,7 +61,7 @@ hermes skills install https://raw.githubusercontent.com/KalkulatorRK/atom-memory
 
 ## Быстрый старт
 
-### 1. Установка БД (Postgres 16 + pgvector + схема)
+### 1. Установка БД (PostgreSQL 16+ + pgvector + схема)
 
 ```bash
 sudo bash scripts/setup_memory_db.sh memory hermes your_password

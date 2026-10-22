@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Развёртывание атомной памяти агента: Postgres 16 + pgvector + БД + схема + права.
+# Развёртывание атомной памяти агента: PostgreSQL 16+ + pgvector + БД + схема + права.
 # Использование: sudo bash setup_memory_db.sh [db_name] [db_user] [db_password]
 # Пример:        sudo bash setup_memory_db.sh memory hermes my_secret_pass
 #

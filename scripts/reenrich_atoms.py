@@ -37,8 +37,9 @@ def main():
         SELECT a.id, a.ordinal, a.content, a.metadata->>'page'
         FROM atoms a JOIN versions v ON a.version_id = v.id
         WHERE a.version_id = %s AND a.atom_type = 'text'
-          AND NOT (jsonb_typeof(a.metadata -> 'tags') = 'array'
-                   AND jsonb_array_length(a.metadata -> 'tags') > 0)
+          AND COALESCE(jsonb_array_length(
+                CASE WHEN jsonb_typeof(a.metadata -> 'tags') = 'array'
+                     THEN a.metadata -> 'tags' END), 0) = 0
         ORDER BY a.ordinal
         """,
         (version_id,),

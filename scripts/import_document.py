@@ -9,6 +9,8 @@
 """
 import argparse
 import hashlib
+
+from _common import normalize_table_no, normalize_fig_no, __version__
 import json
 import os
 import re
@@ -46,12 +48,13 @@ def pdf_to_pages(pdf_path: str):
     try:
         pages = []
         for page in doc:
-            text = page.get_text()
-            for tab in _safe_tables(page):
-                for line in _lines(page):
-                    if _overlaps(line["bbox"], tab.bbox):
-                        text = text.replace(line["text"], "", 1)
-            pages.append((page.number + 1, text))
+            # Текст собирается из строк по позиции, а не из get_text() с вырезанием
+            # по содержимому: str.replace убирал первое вхождение строки где угодно
+            # на странице, и ячейка «2» стирала первую двойку из обычного текста.
+            tables = _safe_tables(page)
+            kept = [ln["text"] for ln in _lines(page)
+                    if not any(_overlaps(ln["bbox"], t.bbox) for t in tables)]
+            pages.append((page.number + 1, "\n".join(kept)))
         return pages
     finally:
         doc.close()
@@ -356,7 +359,7 @@ def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
-                    "User-Agent": "atom-memory-postgres/1.5",
+                    "User-Agent": f"atom-memory-postgres/{__version__}",
                 },
                 json={
                     "model": os.environ.get("LLM_MODEL", "deepseek/deepseek-v4-flash"),
@@ -601,35 +604,52 @@ def import_doc(pdf_path, project_name):
              json.dumps(meta, ensure_ascii=False)))
         atom_ids[atom["ordinal"]] = cur.fetchone()[0]
 
-    # Резолвинг refs → atom_links
-    links = 0
+    # Резолвинг refs → atom_links: одна карта table_no/fig_no → id на версию.
+    # Сопоставление по типу ссылки — таблица не привязывается к рисунку.
+    cur.execute(
+        "SELECT id, atom_type, metadata->>'table_no' AS tn, metadata->>'fig_no' AS fn "
+        "FROM atoms WHERE version_id=%s AND status='active' ORDER BY id",
+        (version_id,))
+    table_idx, fig_idx = {}, {}
+    for aid, atype, tn, fn in cur.fetchall():
+        if tn:
+            table_idx.setdefault(normalize_table_no(tn), []).append(aid)
+        if fn:
+            fig_idx.setdefault(normalize_fig_no(fn), []).append(aid)
+
+    inserts = []
     for atom in enriched:
         refs = atom.get("metadata", {}).get("refs", [])
         from_id = atom_ids.get(atom["ordinal"])
         if not from_id or not refs:
             continue
         for ref in refs:
-            target = str(ref.get("target", "")).lower().strip()
-            rtype = ref.get("type", "table")
+            target = str(ref.get("target", "")).strip()
+            rtype = str(ref.get("type", "")).lower()
             if not target:
                 continue
-            # Ищем атом-цель по table_no / fig_no в метаданных
-            cur.execute(
-                "SELECT id FROM atoms WHERE version_id=%s AND status='active' AND ("
-                "lower(metadata->>'table_no') = lower(%s) OR "
-                "lower(metadata->>'fig_no') = lower(%s) OR "
-                "lower(metadata->>'fig_no') = lower('рис. ' || %s)) LIMIT 1",
-                (version_id, target, target, target))
-            row = cur.fetchone()
-            if row:
-                try:
-                    cur.execute(
-                        "INSERT INTO atom_links (from_atom, to_atom, rel_type) VALUES (%s, %s, %s) "
-                        "ON CONFLICT DO NOTHING",
-                        (from_id, row[0], f"references_{rtype}"))
-                    links += cur.rowcount
-                except Exception as e:
-                    print(f"      ссылка не записалась: {e}", file=sys.stderr)
+            to_id = None
+            if rtype in ("table", "appendix"):
+                cands = table_idx.get(normalize_table_no(target), [])
+                if cands:
+                    to_id = cands[0]
+            elif rtype in ("figure", "image"):
+                cands = fig_idx.get(normalize_fig_no(target), [])
+                if cands:
+                    to_id = cands[0]
+            else:
+                print(f"      неизвестный тип ссылки '{rtype}', пропущено", file=sys.stderr)
+                continue
+            if to_id and to_id != from_id:
+                inserts.append((from_id, to_id, f"references_{rtype}"))
+
+    links = 0
+    if inserts:
+        from psycopg2.extras import execute_values
+        execute_values(cur,
+            "INSERT INTO atom_links (from_atom, to_atom, rel_type) VALUES %s "
+            "ON CONFLICT DO NOTHING", inserts)
+        links = cur.rowcount
 
     cur.execute(
         "INSERT INTO journal (op_type, details) VALUES ('import', %s::jsonb)",

@@ -9,27 +9,23 @@ import os
 import sys
 import tempfile
 import unittest
-from urllib.parse import urlparse
 
 import psycopg2
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import import_document as im  # noqa: E402
+from _db_guard import require  # noqa: E402
+
+try:
+    import pytest
+    pytestmark = pytest.mark.db
+except ImportError:
+    pytestmark = None
 
 DSN = os.environ.get("TEST_PG_DSN")
+PROD_DSN = os.environ.get("PG_DSN") or ""
 CALLS = {"n": 0}
-
-
-def _dbname(dsn):
-    return urlparse(dsn).path.lstrip("/")
-
-
-def _safe():
-    if not DSN:
-        return False
-    if os.environ.get("PG_DSN") and DSN == os.environ["PG_DSN"]:
-        return False
-    return "test" in _dbname(DSN).lower()
 
 
 def _fake_enrich(batch, doc_title="", prev_tail=""):
@@ -48,8 +44,8 @@ def _pdf(path, text):
     doc.close()
 
 
-def _wipe():
-    conn = psycopg2.connect(os.environ["PG_DSN"])
+def _wipe(dsn):
+    conn = psycopg2.connect(dsn)
     cur = conn.cursor()
     cur.execute("DELETE FROM atom_links; DELETE FROM journal; DELETE FROM atoms; "
                 "DELETE FROM versions; DELETE FROM sources; DELETE FROM projects;")
@@ -59,7 +55,7 @@ def _wipe():
 
 
 def _projects():
-    conn = psycopg2.connect(os.environ["PG_DSN"])
+    conn = psycopg2.connect(DSN)
     cur = conn.cursor()
     cur.execute("SELECT name FROM projects ORDER BY name")
     rows = [r[0] for r in cur.fetchall()]
@@ -68,16 +64,16 @@ def _projects():
     return rows
 
 
-@unittest.skipUnless(_safe(), "нужен TEST_PG_DSN на отдельной базе с «test» в имени")
 class ProjectConflictTests(unittest.TestCase):
     def setUp(self):
+        require(DSN, PROD_DSN)
         self._old_pg = os.environ.get("PG_DSN")
         os.environ["PG_DSN"] = DSN
         import importlib
         importlib.reload(im)
         im.enrich_batch = _fake_enrich
         CALLS["n"] = 0
-        _wipe()
+        _wipe(DSN)
 
     def tearDown(self):
         if self._old_pg is None:
