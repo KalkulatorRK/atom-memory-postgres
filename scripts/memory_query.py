@@ -101,7 +101,7 @@ def main():
                     rows.append(r)
 
     for aid, atype, content, meta, source, vno, rank in rows:
-        page = (meta or {}).get("page", "?")
+        page = (meta or {}).get("page") or "?"
         tags = (meta or {}).get("tags", [])
         print(f"[{aid}] {source} v{vno} стр.{page} ({atype}) {content[:400]}")
         if tags:

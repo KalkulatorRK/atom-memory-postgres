@@ -34,13 +34,38 @@ def get_pg():
 
 
 def pdf_to_pages(pdf_path: str):
-    """Шаг 1: PDF → список (номер_страницы, текст). Документ закрывается."""
+    """Шаг 1: PDF → список (номер_страницы, текст). Документ закрывается.
+
+    Текст внутри найденных таблиц вырезается: иначе ячейки попадают и в атом
+    таблицы, и в текстовые атомы, а текстовый атом получает чужую страницу.
+    """
     import fitz
     doc = fitz.open(pdf_path)
     try:
-        return [(page.number + 1, page.get_text()) for page in doc]
+        pages = []
+        for page in doc:
+            text = page.get_text()
+            for tab in _safe_tables(page):
+                for block in page.get_text("blocks"):
+                    if _inside(block[:4], tab.bbox):
+                        text = text.replace(block[4], "")
+            pages.append((page.number + 1, text))
+        return pages
     finally:
         doc.close()
+
+
+def _safe_tables(page):
+    try:
+        return page.find_tables().tables
+    except Exception as e:
+        print(f"      таблицы на стр. {page.number + 1} не извлеклись: {e}", file=sys.stderr)
+        return []
+
+
+def _inside(block, bbox, tol=2):
+    x0, y0, x1, y1 = block
+    return x0 >= bbox[0] - tol and y0 >= bbox[1] - tol and x1 <= bbox[2] + tol and y1 <= bbox[3] + tol
 
 
 def pdf_to_text(pdf_path: str) -> str:
@@ -209,10 +234,11 @@ def extract_tables_images(pdf_path: str):
 
 
 def _nearest_caption(page, bbox, kind):
-    """Подпись ближайшая к объекту: над ним для таблиц, под ним для рисунков.
+    """Подпись, ближайшая к объекту и по вертикали, и по горизонтали.
 
-    kind='table' ищет «Таблица N», kind='figure' — «рис. N» / «Рисунок N».
-    Возвращает (номер, заголовок). Номер в том виде, как в документе.
+    Две подписи в одной строке pymupdf отдаёт одним блоком, и search брал
+    первую для обоих рисунков. Поэтому перебираем все совпадения (finditer)
+    и берём то, чей горизонтальный интервал ближе к объекту.
     """
     if kind == "table":
         rx = re.compile(r'Таблица\s+([0-9]+(?:\.[0-9]+)?|[А-Яа-яA-Za-z](?:\.[0-9]+)?)(?!\w)'
@@ -222,23 +248,26 @@ def _nearest_caption(page, bbox, kind):
         rx = re.compile(r'(?:рис\.|Рисунок|рисунок|Схема|схема)\s*'
                         r'([0-9]+(?:\.[0-9]+)?|[А-Яа-яA-Za-z](?:\.[0-9]+)?)(?!\w)')
         above = False
-    best, best_gap = None, None
+    best, best_dist = None, None
     for b in page.get_text("blocks"):
         x0, y0, x1, y1, text = b[:5]
-        m = rx.search(text or "")
-        if not m:
+        vgap = (bbox[1] - y1) if above else (y0 - bbox[3])
+        if vgap < -5:
             continue
-        gap = (bbox[1] - y1) if above else (y0 - bbox[3])
-        if gap < -5:
-            continue
-        if best_gap is None or gap < best_gap:
-            best, best_gap = m, gap
+        for m in rx.finditer(text or ""):
+            # горизонталь: совпадение внутри блока, положение оцениваем по блоку
+            hgap = 0 if x1 >= bbox[0] and x0 <= bbox[2] else min(abs(x0 - bbox[2]), abs(bbox[0] - x1))
+            dist = vgap + hgap
+            if best_dist is None or dist < best_dist:
+                best, best_dist = m, dist
     if not best:
         return None, ""
     number = best.group(1)
     if kind == "figure":
         number = f"рис. {number}"
-    title = best.group(2).strip() if kind == "table" and best.lastindex and best.lastindex >= 2 and best.group(2) else ""
+    title = ""
+    if kind == "table" and best.lastindex and best.lastindex >= 2 and best.group(2):
+        title = best.group(2).strip()
     return number, title
 
 
@@ -353,7 +382,7 @@ def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
                 "summary": meta.get("summary", atom["content"][:80]),
                 "atom_type": meta.get("atom_type", atom["atom_type"]),
                 "refs": meta.get("refs", []),
-                "page": atom.get("page"),
+                **({"page": atom.get("page")} if atom.get("page") else {}),
                 "source_doc": doc_title}})
     else:
         for atom in atoms_batch:
@@ -484,7 +513,7 @@ def import_doc(pdf_path, project_name):
             for atom in batches[bi]:
                 enriched.append({**atom, "metadata": {
                     "tags": [], "entities": [], "summary": atom["content"][:80],
-                    "atom_type": atom["atom_type"], "page": atom.get("page"),
+                    "atom_type": atom["atom_type"], **({"page": atom.get("page")} if atom.get("page") else {}),
                     "source_doc": doc_title}})
     print(f"      Обогащено: {len(enriched)} атомов")
 

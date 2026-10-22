@@ -28,20 +28,16 @@ metadata:
 
 ## Требования
 
-- Linux, Python 3.10+, PostgreSQL 16 + pgvector (`sudo apt-get install -y postgresql-16 postgresql-16-pgvector`)
+- Linux, Python 3.10+, PostgreSQL 16 или новее + pgvector. Скрипт установки определяет версию сам.
 - `pip install pymupdf psycopg2 requests` (в venv агента)
 - LLM-ключ для обогащения метаданных — опционально: без него импорт работает, атомы просто остаются без тегов (рекомендуется DeepSeek-совместимый OpenAI endpoint)
 
 ## Развёртывание
 
-### 1. Postgres (эконом-конфиг для слабого VPS — проверено)
+### 1. Postgres
 
-```bash
-sudo apt-get install -y postgresql-16 postgresql-16-pgvector
-CONF=/etc/postgresql/16/main/postgresql.conf
-sudo sed -i "s/^#*shared_buffers.*/shared_buffers = 128MB/; s/^#*work_mem.*/work_mem = 4MB/; s/^#*maintenance_work_mem.*/maintenance_work_mem = 64MB/; s/^#*max_connections.*/max_connections = 20/; s/^#*effective_cache_size.*/effective_cache_size = 512MB/" $CONF
-sudo systemctl restart postgresql
-```
+Нужен PostgreSQL 16+ с pgvector. На Ubuntu: `sudo apt-get install -y postgresql postgresql-pgvector`.
+Эконом-конфиг для слабого VPS скрипт установки применяет сам, править `postgresql.conf` руками не нужно.
 
 ### 2–3. БД, роль, схема и права
 
@@ -56,8 +52,17 @@ sudo bash scripts/setup_memory_db.sh memory hermes 'ваш_пароль'
 Он ставит PostgreSQL 16 + pgvector, создаёт БД и роль, применяет схему от
 суперпользователя и выдаёт права. Пароль в лог не печатается.
 
-Индексы из `references/migrations/0002_indexes.sql` скрипт применяет сам.
-Повторно их можно накатить той же командой — файл идемпотентен.
+Скрипт сам применяет схему и все миграции из `references/migrations/`.
+Для уже развёрнутой базы миграции накатываются отдельно, от суперпользователя:
+
+```bash
+for f in references/migrations/*.sql; do
+    sudo -u postgres psql -d memory -v ON_ERROR_STOP=1 -f "$f"
+done
+```
+
+Файлы идемпотентны. Если `0003_location_unique.sql` падает с `duplicate key`,
+в базе два источника с одним путём — их надо слить до повторного прогона.
 
 ### 4. Переменные окружения
 
@@ -111,7 +116,8 @@ python3 scripts/memory_query.py "метод контроля" --project "my-proj
 - Журнал операций — таблица `journal`: `import_document.py` пишет строку на каждый импорт.
 - Страница хранится в `metadata.page` у атомов всех типов, включая текст.
 - `embeddings` и pgvector в схеме есть, но векторный поиск не реализован — поиск это FTS.
-- Дополнительные индексы (хранимый `tsv`, pg_trgm) — `references/migrations/0002_indexes.sql`, применять отдельно.
+- Миграции: `0002` — индексы, `0003` — уникальность пути источника. Применяет setup, повторно — командой из раздела «Развёртывание».
+- Один файл принадлежит одному проекту: `location` уникален. Импорт того же файла с другим `--project` завершается ошибкой, а не создаёт копию.
 
 ## Common Pitfalls
 
