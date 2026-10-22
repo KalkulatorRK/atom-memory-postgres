@@ -77,7 +77,7 @@ def main():
             if not meta.get("tags"):
                 continue
             cur.execute(
-                "UPDATE atoms SET metadata = %s WHERE id = %s",
+                "UPDATE atoms SET metadata = metadata || %s::jsonb WHERE id = %s",
                 (json.dumps(meta, ensure_ascii=False), atom["id"]),
             )
             updated += 1

@@ -90,7 +90,7 @@ def smart_split(text: str):
 
     def page_of(fragment):
         marks = re.findall(r'<!-- страница (\d+) -->', fragment)
-        return int(marks[-1]) if marks else None
+        return int(marks[0]) if marks else None
 
     def emit(buf):
         nonlocal ordinal, page
@@ -186,7 +186,9 @@ def extract_tables_images(pdf_path: str):
                 fpath = os.path.join(ASSETS_DIR, fname)
                 pix.save(fpath)
 
-                fig_no, _cap = _nearest_caption(page, pix.irect, "figure")
+                rects = page.get_image_rects(xref)
+                fig_bbox = rects[0] if rects else pix.irect
+                fig_no, _cap = _nearest_caption(page, fig_bbox, "figure")
 
                 images.append({
                     "ordinal": 0,
@@ -210,12 +212,12 @@ def _nearest_caption(page, bbox, kind):
     Возвращает (номер, заголовок). Номер в том виде, как в документе.
     """
     if kind == "table":
-        rx = re.compile(r'Таблица\s+([0-9]+(?:\.[0-9]+)?|[А-Яа-яA-Za-z](?:\.[0-9]+)?)'
+        rx = re.compile(r'Таблица\s+([0-9]+(?:\.[0-9]+)?|[А-Яа-яA-Za-z](?:\.[0-9]+)?)(?!\w)'
                         r'(?:\s*[—–-]\s*([^\n]+))?')
         above = True
     else:
         rx = re.compile(r'(?:рис\.|Рисунок|рисунок|Схема|схема)\s*'
-                        r'([0-9]+(?:\.[0-9]+)?|[А-Яа-яA-Za-z](?:\.[0-9]+)?)')
+                        r'([0-9]+(?:\.[0-9]+)?|[А-Яа-яA-Za-z](?:\.[0-9]+)?)(?!\w)')
         above = False
     best, best_gap = None, None
     for b in page.get_text("blocks"):
@@ -348,6 +350,7 @@ def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
                 "summary": meta.get("summary", atom["content"][:80]),
                 "atom_type": meta.get("atom_type", atom["atom_type"]),
                 "refs": meta.get("refs", []),
+                "page": atom.get("page"),
                 "source_doc": doc_title}})
     else:
         for atom in atoms_batch:
@@ -357,8 +360,33 @@ def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
     return enriched
 
 
+def _unchanged(pdf_path, project_name):
+    """True, если этот файл уже импортирован с тем же sha.
+
+    Проверяется до нарезки и LLM: иначе неизменённый документ всё равно
+    уходит во внешний API и стоит денег.
+    """
+    pdf_path = os.path.abspath(pdf_path)
+    with open(pdf_path, "rb") as fh:
+        sha = hashlib.sha256(fh.read()).hexdigest()
+    conn = get_pg()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT s.content_sha FROM sources s "
+        "JOIN projects p ON s.project_id = p.id "
+        "WHERE s.location = %s AND p.name = %s",
+        (pdf_path, project_name))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return bool(row) and row[0] == sha
+
+
 def import_doc(pdf_path, project_name):
     t0 = time.time()
+    if _unchanged(pdf_path, project_name):
+        print("      Без изменений (sha совпал), импорт пропущен")
+        return 0, 0
     print(f"[1/4] Конвертация PDF → текст...")
     md = pdf_to_text(pdf_path)
     md = normalize_text(md)

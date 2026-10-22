@@ -43,28 +43,26 @@ sudo sed -i "s/^#*shared_buffers.*/shared_buffers = 128MB/; s/^#*work_mem.*/work
 sudo systemctl restart postgresql
 ```
 
-### 2. БД + пользователь + права (PG15+: GRANT USAGE — ОБЯЗАТЕЛЕН)
+### 2–3. БД, роль, схема и права
+
+Вручную эти шаги легко сделать неправильно: на PG15+ роли без `CREATE` на
+схему `public` не создать ни одной таблицы, а `psql -f` без
+`-v ON_ERROR_STOP=1` вернёт 0 даже при ошибках. Поэтому всё делает скрипт:
 
 ```bash
-sudo -u postgres psql -c "CREATE DATABASE memory;"
-sudo -u postgres psql -d memory -c "CREATE EXTENSION IF NOT EXISTS vector;"
-sudo -u postgres psql <<'EOF'
-CREATE ROLE hermes LOGIN PASSWORD 'ваш_пароль';
-GRANT ALL PRIVILEGES ON DATABASE memory TO hermes;
-GRANT USAGE ON SCHEMA public TO hermes;
-GRANT ALL ON ALL TABLES IN SCHEMA public TO hermes;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO hermes;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO hermes;
-EOF
+sudo bash scripts/setup_memory_db.sh memory hermes 'ваш_пароль'
 ```
 
-### 3. Схема (7 таблиц)
+Он ставит PostgreSQL 16 + pgvector, создаёт БД и роль, применяет схему от
+суперпользователя и выдаёт права. Пароль в лог не печатается.
+
+Дополнительные индексы (хранимый `tsv`, pg_trgm) применяются отдельно и тоже
+от суперпользователя — роль приложения не владеет таблицами:
 
 ```bash
-psql "postgresql://hermes:пароль@localhost:5432/memory" -f references/schema.sql
+sudo -u postgres psql -d memory -v ON_ERROR_STOP=1 \
+    -f references/migrations/0002_indexes.sql
 ```
-
-Таблицы: `projects → sources → versions → atoms` + `atom_links` + `embeddings` (опц.) + `journal`. Индексы: GIN по `metadata`, GIN FTS `to_tsvector('public.ru_en', content)` (RU+EN морфология), `idx_links_to`.
 
 ### 4. Переменные окружения
 

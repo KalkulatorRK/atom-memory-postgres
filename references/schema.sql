@@ -517,3 +517,6 @@ ALTER TABLE ONLY public.sources
 
 ALTER TABLE ONLY public.versions
     ADD CONSTRAINT versions_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.sources(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.sources
+    ADD CONSTRAINT sources_location_key UNIQUE (location);

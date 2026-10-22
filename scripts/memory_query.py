@@ -121,7 +121,7 @@ def main():
                 if tmeta.get("table_no"):
                     loc = f" табл.{tmeta['table_no']}"
                 elif tmeta.get("fig_no"):
-                    loc = f" рис.{tmeta['fig_no']}"
+                    loc = f" {tmeta['fig_no']}"
             print(f"    ↳ {ttype}{loc}: {tcontent}")
         print()
 

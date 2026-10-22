@@ -58,6 +58,10 @@ SCHEMA="$SCRIPT_DIR/../references/schema.sql"
 # которые роль приложения создать не может. -v ON_ERROR_STOP=1 обязателен —
 # без него psql возвращает 0 даже при ошибках, и set -e их не ловит.
 sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$SCHEMA"
+MIGRATION="$SCRIPT_DIR/../references/migrations/0002_indexes.sql"
+if [ -f "$MIGRATION" ]; then
+    sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$MIGRATION"
+fi
 
 # Права на созданные объекты — отдельным шагом, после того как таблицы есть.
 sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
