@@ -144,11 +144,17 @@ def normalize_text(md: str) -> str:
             prev_raw = s
             continue
         prev_line, prev_was = normalize_prev_for_point(buffer, prev_raw)
+        from structure_headings import (
+            is_code_structure_boundary_line,
+            is_running_header_line,
+        )
+
         is_new_block = (
             s.startswith('<!--') or s.startswith('#') or s.startswith('- ') or
             s.startswith('* ') or s.startswith('|') or
             re.match(r'^(?:Статья|СТАТЬЯ)\s+\d', s) or
-            re.match(r'^(?:Глава|ГЛАВА|Раздел|РАЗДЕЛ|Часть)\s', s, re.IGNORECASE) or
+            is_code_structure_boundary_line(s) or
+            is_running_header_line(s) or
             is_paren_boundary_line(s) or
             _normalize_is_numbered_heading(
                 s, prev_line, prev_was_structure_heading=prev_was

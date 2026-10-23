@@ -10,10 +10,12 @@ from typing import Any
 
 from structure_headings import (
     ArticleHeadingState,
+    RE_PARAGRAPH_SECTION,
     StructureLineState,
     accept_article_heading,
     accept_code_point_line,
     detect_lowercase_heading_style,
+    is_running_header_line,
     is_structure_heading_line,
     is_toc_heading_line,
     split_inline_article_segments,
@@ -366,7 +368,10 @@ def _update_ctx_from_paragraph(
     m = RE_CHAPTER.match(s)
     if m:
         ctx.chapter = m.group(1)
-        return False
+        return ctx.doc_kind == "code"
+
+    if ctx.doc_kind == "code" and RE_PARAGRAPH_SECTION.match(s):
+        return True
 
     m = RE_PART.match(s)
     if m:
@@ -379,7 +384,7 @@ def _update_ctx_from_paragraph(
         return False
 
     if RE_SECTION_CODE.match(s):
-        return False
+        return ctx.doc_kind == "code"
 
     m = RE_ANNEX.match(s)
     if m:
@@ -481,6 +486,30 @@ def _expand_structure_lines(
     return out or ([para.strip()] if para.strip() else [])
 
 
+def _collapse_orphan_heading_atoms(atoms: list[dict]) -> list[dict]:
+    """Заголовок без пункта перед тем же article+p.1 — влить в первый пункт (оглавление глав)."""
+    out: list[dict] = []
+    i = 0
+    while i < len(atoms):
+        a = atoms[i]
+        meta = a.get("structure_meta") or {}
+        if (
+            meta.get("article")
+            and not meta.get("point")
+            and i + 1 < len(atoms)
+        ):
+            nxt = atoms[i + 1]
+            nm = nxt.get("structure_meta") or {}
+            if nm.get("article") == meta.get("article") and nm.get("point"):
+                nxt = {**nxt, "content": a["content"] + " " + nxt["content"]}
+                out.append(nxt)
+                i += 2
+                continue
+        out.append(a)
+        i += 1
+    return out
+
+
 def _merge_heading_atoms(atoms: list[dict]) -> list[dict]:
     merged: list[dict] = []
     i = 0
@@ -536,6 +565,27 @@ def _pack_block(text: str, meta: dict, chunk_max: int) -> list[dict]:
     return atoms
 
 
+def _repeated_header_lines(text: str) -> set[str]:
+    from collections import Counter
+
+    per_page: dict[int, set[str]] = {}
+    page = 1
+    for para in text.split("\n\n"):
+        marks = PAGE_MARK.findall(para)
+        if marks:
+            page = int(marks[-1])
+        body = PAGE_MARK.sub("", para).strip()
+        for raw in body.split("\n"):
+            s = raw.strip()
+            if s and not s.startswith("<!--"):
+                per_page.setdefault(page, set()).add(s)
+    counts: Counter[str] = Counter()
+    for lines in per_page.values():
+        for ln in lines:
+            counts[ln] += 1
+    return {ln for ln, n in counts.items() if n >= 3}
+
+
 def structure_split(
     text: str,
     ctx: StructureContext,
@@ -544,6 +594,7 @@ def structure_split(
     chunk_min: int = 300,
 ) -> list[dict]:
     """Нарезка с жёсткими границами структуры; длинные блоки режутся по предложениям."""
+    repeated_headers = _repeated_header_lines(text)
     paragraphs: list[tuple[int | None, str]] = []
     page: int | None = None
     for para in text.split("\n\n"):
@@ -593,6 +644,17 @@ def structure_split(
             after_page_break=line_state.after_page_break,
         )
         for line in lines:
+            if is_running_header_line(
+                line, repeated=line in repeated_headers
+            ):
+                if cur_parts:
+                    flush()
+                banner_ctx = cur_ctx.copy()
+                banner_ctx.article = None
+                banner_ctx.point = None
+                banner_ctx.subpoint = None
+                blocks.append((banner_ctx, line, block_start_page))
+                continue
             update_toc_state(line_state, line)
             new_ctx = cur_ctx.copy()
             hard = _update_ctx_from_paragraph(
@@ -650,6 +712,7 @@ def structure_split(
             merged.append(a)
     merged = _merge_heading_atoms(merged)
     if ctx.doc_kind == "code":
+        merged = _collapse_orphan_heading_atoms(merged)
         merged = _attach_preamble(merged)
     return merged
 
@@ -668,6 +731,7 @@ def build_page_context_map(text: str, ctx: StructureContext) -> dict[int, dict[s
             cur.page = page
             ls.after_page_break = True
         body = PAGE_MARK.sub("", para).strip()
+        repeated_headers = _repeated_header_lines(text)
         for line in _expand_structure_lines(
             body,
             heading_state=hs,
@@ -677,6 +741,10 @@ def build_page_context_map(text: str, ctx: StructureContext) -> dict[int, dict[s
             at_doc_start=ls.at_doc_start,
             after_page_break=ls.after_page_break,
         ):
+            if is_running_header_line(
+                line, repeated=line in repeated_headers
+            ):
+                continue
             update_toc_state(ls, line)
             _update_ctx_from_paragraph(
                 cur, line, heading_state=hs, line_state=ls

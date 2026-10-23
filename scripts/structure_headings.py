@@ -22,6 +22,21 @@ RE_INLINE_ARTICLE = re.compile(r"(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)*)
 RE_CHAPTER_HEADING = re.compile(
     r"^(?:Глава|ГЛАВА|Раздел|РАЗДЕЛ|Часть|ЧАСТЬ)\s+\S", re.IGNORECASE
 )
+RE_SUBSECTION_HEADING = re.compile(
+    r"^(?:Подраздел|ПОДРАЗДЕЛ)\s+\S", re.IGNORECASE
+)
+RE_PARAGRAPH_SECTION = re.compile(r"^§\s*\d+(?:\.\d+)*\.", re.UNICODE)
+
+RE_CONSULTANT_BANNER = re.compile(
+    r"(?:документ\s+предоставлен\s+)?консультант\s*плюс|"
+    r"дата\s+сохранения|consultant\.ru|надежная\s+правовая\s+поддержка|"
+    r"\bгарант\b.*(?:правов|online)",
+    re.IGNORECASE,
+)
+RE_PAGE_COUNT_LINE = re.compile(
+    r"(?i)^(?:страница|стр\.?)\s*\d+\s*(?:из|/)\s*\d+\s*$"
+)
+RE_STANDALONE_URL = re.compile(r"(?i)^(?:https?://|www\.)\S+$")
 
 RE_ABBREV_BEFORE_DOT = re.compile(
     r"(?i)\b(?:п|пп|ст|ч|разд|подп|абз|§)\.\s*$"
@@ -108,7 +123,37 @@ def is_structure_heading_line(s: str) -> bool:
     return bool(
         is_article_heading_line(s)
         or RE_CHAPTER_HEADING.match(s)
+        or RE_SUBSECTION_HEADING.match(s)
+        or RE_PARAGRAPH_SECTION.match(s)
     )
+
+
+def is_code_structure_boundary_line(s: str) -> bool:
+    """Граница блока в кодексе: глава / § / раздел (не склеивать в normalize)."""
+    s = s.strip()
+    return bool(
+        RE_CHAPTER_HEADING.match(s)
+        or RE_SUBSECTION_HEADING.match(s)
+        or RE_PARAGRAPH_SECTION.match(s)
+        or re.match(r"^(?:Раздел|РАЗДЕЛ)\s", s, re.IGNORECASE)
+    )
+
+
+def is_running_header_line(s: str, *, repeated: bool = False) -> bool:
+    s = s.strip()
+    if not s or s.startswith("<!--"):
+        return False
+    if RE_CONSULTANT_BANNER.search(s):
+        return True
+    if RE_PAGE_COUNT_LINE.match(s):
+        return True
+    if RE_STANDALONE_URL.match(s):
+        return True
+    if repeated and len(s) >= 12 and not is_article_heading_line(s):
+        if RE_POINT_LINE.match(s) or RE_SUBPOINT_LINE.match(s):
+            return False
+        return True
+    return False
 
 
 def is_paren_boundary_line(s: str) -> bool:
@@ -230,11 +275,13 @@ def update_toc_state(line_state: StructureLineState, line: str) -> None:
     """TOC = 2+ подряд заголовков без тела; тело — рестарт N ≤ last (P2/Q4)."""
     s = line.strip()
     hs = line_state.heading
-    if RE_CHAPTER_HEADING.match(s):
-        hs.consecutive_heading_lines = 0
-        hs.in_toc_run = False
+    if RE_CHAPTER_HEADING.match(s) or RE_SUBSECTION_HEADING.match(s):
+        if not hs.in_toc_run:
+            hs.consecutive_heading_lines = 0
         return
     if is_repealed_article_heading(s):
+        if hs.in_toc_run:
+            return
         hs.consecutive_heading_lines = 0
         hs.in_toc_run = False
         return
@@ -315,27 +362,35 @@ def accept_article_heading(
         return None, None
 
     toc_style = is_toc_heading_line(s)
-    if (
-        not toc_style
-        and state.last_article is not None
-        and not boundary_before_structure(
-            line_state.prev_line, line_state=line_state
-        )
-    ):
-        return None, None
-
     num = article_number_tuple(num_s)
+    forward = (
+        not lowercase
+        and num is not None
+        and (state.last_article is None or num > state.last_article)
+    )
+    needs_boundary = lowercase or (
+        num is not None
+        and state.last_article is not None
+        and not (num > state.last_article)
+    )
+    if needs_boundary and not toc_style and not forward:
+        if not boundary_before_structure(
+            line_state.prev_line, line_state=line_state
+        ):
+            return None, None
+
     allow_restart = state.after_toc_restart and not lowercase
     if num is None or not _accept_monotonic(
         state, num, lowercase=lowercase, allow_restart=allow_restart
     ):
         return None, None
 
+    if toc_style and not state.in_toc_run:
+        return None, None
+
     state.last_article = num
     if allow_restart:
         state.after_toc_restart = False
-    if toc_style and not state.in_toc_run:
-        return None, None
     tail = s.split(None, 2)
     title = tail[2] if len(tail) > 2 else ""
     return num_s, title

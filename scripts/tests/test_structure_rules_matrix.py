@@ -24,22 +24,26 @@ def _pipeline(
     doc_kind: str = "code",
     title: str = "case.pdf",
     chunk_min: int = 30,
+    md_text: str | None = None,
 ):
-    with tempfile.TemporaryDirectory() as td:
-        pdf = os.path.join(td, title)
-        _make_code_pdf(pdf, lines)
-        md = normalize_text(pdf_to_text(pdf))
-        opts = DocImportOptions(doc_kind=doc_kind, source_title=title)
-        md2, ctx, _ = prepare_for_import(md, opts)
-        if not ctx:
-            from import_document import smart_split
+    if md_text is not None:
+        md = normalize_text(md_text)
+    else:
+        with tempfile.TemporaryDirectory() as td:
+            pdf = os.path.join(td, title)
+            _make_code_pdf(pdf, lines)
+            md = normalize_text(pdf_to_text(pdf))
+    opts = DocImportOptions(doc_kind=doc_kind, source_title=title)
+    md2, ctx, _ = prepare_for_import(md, opts)
+    if not ctx:
+        from import_document import smart_split
 
-            atoms, _ = quality_gate(smart_split(md2))
-            return None, atoms
-        atoms, _ = quality_gate(
-            structure_split(md2, ctx, chunk_max=900, chunk_min=chunk_min)
-        )
-        return ctx, atoms
+        atoms, _ = quality_gate(smart_split(md2))
+        return None, atoms
+    atoms, _ = quality_gate(
+        structure_split(md2, ctx, chunk_max=900, chunk_min=chunk_min)
+    )
+    return ctx, atoms
 
 
 def _structure_keys(atoms: list) -> list[AtomKey]:
@@ -50,6 +54,8 @@ def _structure_keys(atoms: list) -> list[AtomKey]:
         path = m.get("section_path") or []
         if not pt and path:
             pt = path[-1]
+        if not m.get("article") and not path and not pt:
+            continue
         out.append((m.get("article"), pt, m.get("subpoint")))
     return out
 
@@ -89,6 +95,7 @@ class RulesCase:
     title: str
     expected: list[AtomKey] | None
     extra: Callable[[object | None, list], None] | None = None
+    md_text: str | None = None
 
 
 CASES: list[RulesCase] = [
@@ -423,6 +430,113 @@ CASES: list[RulesCase] = [
         [("1", "1", None), ("2", "1", None)],
     ),
     RulesCase(
+        "B5_gk_paragraph_section",
+        [
+            "Статья 454. Продажа имущества",
+            "1. Пункт четыре пять четыре первый достаточной длины для quality gate filter.",
+            "2. Пункт четыре пять четыре второй достаточной длины для quality gate filter.",
+            "§ 2. Розничная купля-продажа",
+            "Статья 492. Договор розничной купли-продажи",
+            "1. Пункт четыре девять два первый достаточной длины для quality gate filter.",
+            "2. Пункт четыре девять два второй достаточной длины для quality gate filter.",
+        ],
+        "code",
+        "q_para.pdf",
+        [
+            ("454", "1", None),
+            ("454", "2", None),
+            ("492", "1", None),
+            ("492", "2", None),
+        ],
+    ),
+    RulesCase(
+        "B5_consultant_header_page",
+        [],
+        "code",
+        "q_hdr_date.pdf",
+        [
+            ("474", "1", None),
+            ("475", "1", None),
+            ("475", "2", None),
+            ("476", "1", None),
+        ],
+        md_text=(
+            "<!-- страница 1 -->\n\n"
+            "Статья 474. Качество товара\n\n"
+            "1. Первый пункт четыре семь четыре достаточной длины для quality gate filter.\n\n"
+            "<!-- страница 2 -->\n\n"
+            "Документ предоставлен КонсультантПлюс Дата сохранения: 23.10.2026\n\n"
+            "Статья 475. Недостатки товара\n\n"
+            "1. Пункт четыре семь пять первый достаточной длины для quality gate filter.\n\n"
+            "2. Пункт четыре семь пять второй достаточной длины для quality gate filter.\n\n"
+            "Статья 476. Последствия\n\n"
+            "1. Пункт четыре семь шесть первый достаточной длины для quality gate filter."
+        ),
+    ),
+    RulesCase(
+        "B5_toc_chapter_single_article",
+        [
+            "Статья 1. Введение .............. 3",
+            "Статья 2. Термины ............... 5",
+            "Статья 3. Общие положения ....... 7",
+            "Глава II. Заключительные положения",
+            "Статья 4. Вступление в силу ....... 9",
+            "Текст преамбулы основного текста достаточной длины для quality gate filter.",
+            "Статья 1. Основные понятия",
+            "1. Текст первой статьи тела достаточной длины для quality gate filter.",
+            "Статья 2. Права",
+            "1. Текст второй статьи тела достаточной длины для quality gate filter.",
+            "Статья 3. Обязанности",
+            "1. Текст третьей статьи тела достаточной длины для quality gate filter.",
+        ],
+        "code",
+        "q_toc_ch1.pdf",
+        [
+            ("2", None, None),
+            ("3", None, None),
+            ("4", None, None),
+            ("1", "1", None),
+            ("2", "1", None),
+            ("3", "1", None),
+        ],
+    ),
+    RulesCase(
+        "B5_toc_repealed_tail",
+        [
+            "Статья 1. Раздел первый ........... 1",
+            "Статья 2. Раздел второй ........... 2",
+            "Статья 3.1. Утратила силу. ....... 3",
+            "Статья 1. Тело первой",
+            "1. Текст тела статьи один достаточной длины для quality gate filter.",
+            "Статья 2. Тело второй",
+            "1. Текст тела статьи два достаточной длины для quality gate filter.",
+            "Статья 3. Тело третьей",
+            "1. Текст тела статьи три достаточной длины для quality gate filter.",
+        ],
+        "code",
+        "q_toc_rep.pdf",
+        [
+            ("2", None, None),
+            ("3.1", None, None),
+            ("1", "1", None),
+            ("2", "1", None),
+            ("3", "1", None),
+        ],
+    ),
+    RulesCase(
+        "B5_toc_single_dotted_line",
+        [
+            "Статья 1. Основные понятия ........ 3",
+            "Статья 1. Основные понятия",
+            "1. Текст первой статьи тела достаточной длины для quality gate filter.",
+            "Статья 2. Права граждан",
+            "1. Текст второй статьи достаточной длины для quality gate filter.",
+        ],
+        "code",
+        "toc_single_dot.pdf",
+        [("1", "1", None), ("2", "1", None)],
+    ),
+    RulesCase(
         "Q_gost_ref46_no_46",
         [
             "ГОСТ Р 56542-2019",
@@ -455,7 +569,10 @@ class HeadingRulesMatrixTests(unittest.TestCase):
                     md = normalize_text("\n".join(case.lines))
                     self.assertIsNone(detect_doc_kind(md, case.title, "auto"))
                 ctx, atoms = _pipeline(
-                    case.lines, doc_kind=case.doc_kind, title=case.title
+                    case.lines,
+                    doc_kind=case.doc_kind,
+                    title=case.title,
+                    md_text=case.md_text,
                 )
                 if case.expected is not None:
                     _assert_structure(atoms, case.expected, case_id=case.case_id)
