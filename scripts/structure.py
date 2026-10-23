@@ -14,7 +14,6 @@ from structure_headings import (
     accept_article_heading,
     accept_code_point_line,
     detect_lowercase_heading_style,
-    is_capital_article_heading,
     is_structure_heading_line,
     split_inline_article_segments,
     update_toc_state,
@@ -578,7 +577,6 @@ def structure_split(
         for line in lines:
             update_toc_state(line_state, line)
             new_ctx = cur_ctx.copy()
-            art_before = cur_ctx.article
             hard = _update_ctx_from_paragraph(
                 new_ctx,
                 line,
@@ -656,8 +654,7 @@ def build_page_context_map(text: str, ctx: StructureContext) -> dict[int, dict[s
             body, heading_state=hs, doc_kind=cur.doc_kind, line_state=ls
         ):
             update_toc_state(ls, line)
-            art_before = cur.article
-            hard = _update_ctx_from_paragraph(
+            _update_ctx_from_paragraph(
                 cur, line, heading_state=hs, line_state=ls
             )
             ls.prev_line = line

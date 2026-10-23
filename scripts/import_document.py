@@ -139,7 +139,6 @@ def normalize_text(md: str) -> str:
             out.append(s)
             prev_raw = s
             continue
-        prev_for_point = " ".join(buffer) if buffer else prev_raw
         prev_heading_tail = buffer[-1] if buffer else prev_raw
         is_new_block = (
             s.startswith('<!--') or s.startswith('#') or s.startswith('- ') or
