@@ -17,17 +17,10 @@ def db_ready():
 
 
 def test_migration_idempotent(db_ready):
-    import subprocess
+    from db_fixtures import apply_migrations
 
-    from pathlib import Path
-
-    mig = str(Path(__file__).resolve().parents[2] / "references" / "migrations" / "0004_vector_search.sql")
-    for _ in range(2):
-        subprocess.run(
-            ["sudo", "-u", "postgres", "psql", "-d", "memory_test", "-v", "ON_ERROR_STOP=1", "-f", mig],
-            check=True,
-            capture_output=True,
-        )
+    apply_migrations(db_ready)
+    apply_migrations(db_ready)
     conn = psycopg2.connect(db_ready)
     cur = conn.cursor()
     cur.execute(

@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # Развёртывание атомной памяти агента: PostgreSQL 16+ + pgvector + БД + схема + права.
 # Использование: sudo bash setup_memory_db.sh [db_name] [db_user] [db_password]
-# Пример:        sudo bash setup_memory_db.sh memory hermes my_secret_pass
-#
-# Пароль передаётся аргументом (виден в `ps` на время выполнения) — для продакшена
-# лучше задавать его через .pgpass. В SQL он уходит параметром, не конкатенацией.
+# CI: SETUP_SKIP_INSTALL=1 и ADMIN_DSN=postgresql://postgres:pass@localhost:5432/postgres
 set -euo pipefail
 
 DB_NAME="${1:-memory}"
@@ -12,28 +9,35 @@ DB_USER="${2:-hermes}"
 DB_PASS="${3:-}"
 
 if [ -z "$DB_PASS" ]; then
-    echo "Использование: $0 [db_name] [db_user] [db_password]"
-    exit 1
+    if [ -n "${MEMORY_DB_PASSWORD:-}" ]; then
+        DB_PASS="$MEMORY_DB_PASSWORD"
+    else
+        echo "Использование: $0 [db_name] [db_user] [db_password]"
+        exit 1
+    fi
 fi
 
-# Имена — только буквы/цифры/подчёркивание: они идут в SQL как идентификаторы.
 ident='^[a-zA-Z_][a-zA-Z0-9_]*$'
 if ! [[ "$DB_NAME" =~ $ident && "$DB_USER" =~ $ident ]]; then
     echo "Имя БД и пользователя: только латиница, цифры и подчёркивание."
     exit 1
 fi
 
-if [ -n "${ADMIN_DSN:-}" ]; then
-  PSQL_ADMIN=(psql "$ADMIN_DSN")
-elif [ "$(id -un)" = "postgres" ]; then
-  PSQL_ADMIN=(psql)
-else
-  PSQL_ADMIN=(sudo -u postgres psql)
-fi
+# DSN суперпользователя для конкретной базы (в CI — TCP, без unix-socket).
+admin_psql() {
+    local db="${1:-postgres}"
+    shift
+    if [ -n "${ADMIN_DSN:-}" ]; then
+        local base="${ADMIN_DSN%/*}"
+        psql "${base}/${db}" "$@"
+    elif [ "$(id -un)" = "postgres" ]; then
+        psql -d "$db" "$@"
+    else
+        sudo -u postgres psql -d "$db" "$@"
+    fi
+}
+
 if [ -n "${SETUP_SKIP_INSTALL:-}" ]; then
-  if [ -z "$DB_PASS" ] && [ -n "${MEMORY_DB_PASSWORD:-}" ]; then
-    DB_PASS="$MEMORY_DB_PASSWORD"
-  fi
   echo "[1/4] Пропуск установки (SETUP_SKIP_INSTALL=1)"
   echo "[2/4] Пропуск тюнинга конфига"
 else
@@ -70,22 +74,19 @@ else
 fi
 
 echo "[3/4] Создание БД $DB_NAME и пользователя $DB_USER..."
-# Расширение vector — в целевой БД от суперпользователя; роль приложения CREATE не получает.
-if ! "${PSQL_ADMIN[@]}" -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
-  "${PSQL_ADMIN[@]}" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${DB_NAME}\""
+if ! admin_psql postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
+  admin_psql postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${DB_NAME}\""
 fi
-if ! "${PSQL_ADMIN[@]}" -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
-  "${PSQL_ADMIN[@]}" -v ON_ERROR_STOP=1 \
-    -v db_user="$DB_USER" -v db_pass="$DB_PASS" \
-    -c "CREATE ROLE \"${DB_USER}\" LOGIN PASSWORD '${DB_PASS}'"
+if ! admin_psql postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
+  admin_psql postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE \"${DB_USER}\" LOGIN PASSWORD '${DB_PASS}'"
 else
-  "${PSQL_ADMIN[@]}" -v ON_ERROR_STOP=1 -c "ALTER ROLE \"${DB_USER}\" PASSWORD '${DB_PASS}'"
+  admin_psql postgres -v ON_ERROR_STOP=1 -c "ALTER ROLE \"${DB_USER}\" PASSWORD '${DB_PASS}'"
 fi
-"${PSQL_ADMIN[@]}" -v ON_ERROR_STOP=1 \
+admin_psql postgres -v ON_ERROR_STOP=1 \
   -v db_name="$DB_NAME" -v db_user="$DB_USER" <<'SQL'
 SELECT format('GRANT CONNECT, TEMPORARY ON DATABASE %I TO %I', :'db_name', :'db_user') \gexec
 SQL
-"${PSQL_ADMIN[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
+admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 SELECT format('GRANT USAGE ON SCHEMA public TO %I', :'db_user') \gexec
 SQL
@@ -93,20 +94,16 @@ SQL
 echo "[4/4] Применение схемы..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA="$SCRIPT_DIR/../references/schema.sql"
-# Схему применяет суперпользователь: в дампе есть CREATE EXTENSION и объекты,
-# которые роль приложения создать не может. -v ON_ERROR_STOP=1 обязателен —
-# без него psql возвращает 0 даже при ошибках, и set -e их не ловит.
-"${PSQL_ADMIN[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$SCHEMA"
+admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -f "$SCHEMA"
 for MIGRATION in "$SCRIPT_DIR"/../references/migrations/*.sql; do
     [ -f "$MIGRATION" ] || continue
     case "$MIGRATION" in
       *_down.sql) continue ;;
     esac
-    "${PSQL_ADMIN[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$MIGRATION"
+    admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -f "$MIGRATION"
 done
 
-# Права на созданные объекты — отдельным шагом, после того как таблицы есть.
-"${PSQL_ADMIN[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
+admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
 SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', :'db_user') \gexec
 SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'db_user') \gexec
 SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', :'db_user') \gexec
@@ -118,7 +115,6 @@ echo "Готово. Задайте строку подключения (паро
 echo "  export PG_DSN=\"postgresql://$DB_USER@localhost:5432/$DB_NAME\""
 echo "Проверка: psql \"\$PG_DSN\" -c \"SELECT count(*) FROM pg_tables WHERE schemaname='public'\""
 
-# Доп. HNSW для не-дефолтного пространства (если задано в окружении)
 if [ -n "${EMBED_PROVIDER:-}" ] && [ "${EMBED_PROVIDER}" = "local" ] && [ -n "${EMBED_LOCAL_MODEL:-}" ]; then
   bash "$SCRIPT_DIR/vector_index_admin.sh" --model "local:multilingual-e5-base" --dims "${EMBED_DIMS:-768}" || true
 fi

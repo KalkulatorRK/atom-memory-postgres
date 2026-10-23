@@ -24,8 +24,8 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: pip install ruff
@@ -36,8 +36,8 @@ jobs:
   version:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - run: python scripts/check_version.py
@@ -74,15 +74,23 @@ jobs:
       SETUP_SKIP_INSTALL: "1"
       MEMORY_DB_PASSWORD: ci-app-pass
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
           cache: pip
       - run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Wait for Postgres service
+        run: |
+          for i in $(seq 1 30); do
+            pg_isready -h localhost -p 5432 -U postgres && exit 0
+            sleep 2
+          done
+          exit 1
+        env:
+          PGPASSWORD: ci-only-throwaway
       - run: bash scripts/setup_memory_db.sh memory memory_app "$MEMORY_DB_PASSWORD"
       - run: bash scripts/setup_memory_db.sh memory_test memory_app "$MEMORY_DB_PASSWORD"
-      - run: pytest -q -m "not db" --cov=scripts --cov-report=term
-      - run: pytest -q -m db --cov=scripts --cov-append --cov-report=xml
+      - run: pytest -q -m "" --cov=scripts --cov-report=term --cov-report=xml
       - run: python scripts/tests/test_split.py
