@@ -1,7 +1,7 @@
 ---
 name: atom-memory-postgres
 description: "Развернуть атомную память агента на PostgreSQL 16+ + pgvector: схема (7 таблиц), импорт документов (PDF → атомы, таблицы/схемы целиком, LLM-обогащение), поиск FTS по-русски, версионирование и аудит. Загружать, когда пользователь просит развернуть/настроить атомную базу знаний («память агента») на своей машине, перенести стек атомной памяти, или объяснить архитектуру (атомы, atom_links, версии, триггеры поиска)."
-version: 1.8.0
+version: 1.9.0
 author: Hermes Agent + Андрей К
 license: MIT
 platforms: [linux]
@@ -57,11 +57,14 @@ sudo bash scripts/setup_memory_db.sh memory hermes 'ваш_пароль'
 
 ```bash
 for f in references/migrations/*.sql; do
+    case "$f" in *_down.sql) continue ;; esac
     sudo -u postgres psql -d memory -v ON_ERROR_STOP=1 -f "$f"
 done
 ```
 
-Файлы идемпотентны. Если `0003_location_unique.sql` падает с `duplicate key`,
+Файлы `*_down.sql` — **только ручной откат**, в цикл обновления не включать (иначе сбросятся `embed_policy`, HNSW и колонки embeddings).
+
+Миграции вперёд идемпотентны. Если `0003_location_unique.sql` падает с `duplicate key`,
 в базе два источника с одним путём — их надо слить до повторного прогона.
 
 ### 4. Переменные окружения
@@ -116,8 +119,10 @@ python3 scripts/memory_query.py "метод контроля" --project "my-proj
   - осиротевшие атомы (0 запросов за N дней) → кандидаты на удаление.
 - Журнал операций — таблица `journal`: `import_document.py` пишет строку на каждый импорт.
 - Страница хранится в `metadata.page` у атомов всех типов, включая текст.
-- `embeddings` и pgvector в схеме есть, но векторный поиск не реализован — поиск это FTS.
-- Миграции: `0002` — индексы, `0003` — уникальность пути источника. Применяет setup, повторно — командой из раздела «Развёртывание».
+- Векторный поиск: `scripts/embed_atoms.py`, гибрид через `memory_query.py --mode hybrid` (по умолчанию). Облако — `EMBED_API_KEY` + `EMBED_BASE_URL`; локально — только `EMBED_PROVIDER=local` + `EMBED_LOCAL_MODEL` (без автозагрузки моделей).
+- Политика проекта: `projects.embed_policy` (`inherit` / `cloud` / `local_only` / `none`); установка `embed_atoms.py --set-policy PROJECT none`.
+- Миграции: `0002` — индексы, `0003` — уникальность пути, `0004` — векторный поиск (откат `0004_vector_search_down.sql`). Применяет setup.
+- **Приватность эмбеддингов:** тексты атомов и поисковые запросы уходят на `EMBED_BASE_URL` (отдельно от LLM). Отключение: `EMBED_PROVIDER=none` или `embed_policy=none` для проекта.
 - Один файл принадлежит одному проекту: `location` уникален. Импорт того же файла с другим `--project` завершается ошибкой, а не создаёт копию.
 
 ## Тесты

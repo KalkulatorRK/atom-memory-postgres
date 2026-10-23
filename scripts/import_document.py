@@ -184,7 +184,6 @@ def extract_tables_images(pdf_path: str):
 
     for pno in range(len(doc)):
         page = doc[pno]
-        page_text = page.get_text()
 
         # ===== ТАБЛИЦЫ =====
         try:
@@ -239,6 +238,7 @@ def extract_tables_images(pdf_path: str):
                     "atom_type": "image",
                     "content": f"[изображение: {fname}]",
                     "fig_no": fig_no,
+                    "caption": _cap or None,
                     "file_path": fpath,
                     "page": pno + 1,
                 })
@@ -443,16 +443,16 @@ def import_doc(pdf_path, project_name):
     if existing and existing["same"]:
         print("      Без изменений (sha совпал), импорт пропущен")
         return 0, 0
-    print(f"[1/4] Конвертация PDF → текст...")
+    print("[1/4] Конвертация PDF → текст...")
     md = pdf_to_text(pdf_path)
     md = normalize_text(md)
     print(f"      Текст: {len(md)} символов, {time.time()-t0:.0f} сек")
 
-    print(f"[1а] Таблицы и изображения...")
+    print("[1а] Таблицы и изображения...")
     tables, images = extract_tables_images(pdf_path)
     print(f"      Таблиц: {len(tables)}, изображений: {len(images)}")
 
-    print(f"[2/4] Умная резка по предложениям + quality gate...")
+    print("[2/4] Умная резка по предложениям + quality gate...")
     text_atoms = smart_split(md)
     text_atoms, dropped = quality_gate(text_atoms)
     print(f"      Текст-атомов: {len(text_atoms)} (отброшено мусора: {dropped})")
@@ -474,7 +474,7 @@ def import_doc(pdf_path, project_name):
 
     print(f"      Всего атомов: {len(all_atoms)}")
 
-    print(f"[3/4] Обогащение DeepSeek (параллельно, только текст-атомы)...")
+    print("[3/4] Обогащение DeepSeek (параллельно, только текст-атомы)...")
     enriched = []
     doc_title = os.path.basename(pdf_path)
 
@@ -511,7 +511,6 @@ def import_doc(pdf_path, project_name):
 
     from concurrent.futures import ThreadPoolExecutor, as_completed
     results = {}
-    prev_tail = ""
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         futures = {}
         for bi, batch in enumerate(batches):
@@ -535,7 +534,7 @@ def import_doc(pdf_path, project_name):
                     "source_doc": doc_title}})
     print(f"      Обогащено: {len(enriched)} атомов")
 
-    print(f"[4/4] Запись в PostgreSQL + atom_links...")
+    print("[4/4] Запись в PostgreSQL + atom_links...")
     conn = get_pg()
     cur = conn.cursor()
 
@@ -558,7 +557,7 @@ def import_doc(pdf_path, project_name):
         conn.rollback()
         cur.close()
         conn.close()
-        print(f"      Без изменений (sha совпал), импорт пропущен")
+        print("      Без изменений (sha совпал), импорт пропущен")
         return 0, 0
     if row:
         source_id = row[0]
@@ -596,6 +595,8 @@ def import_doc(pdf_path, project_name):
             meta["title"] = hint["title"]
         if hint.get("page"):
             meta["page"] = hint["page"]
+        if hint.get("caption"):
+            meta["caption"] = hint["caption"]
 
         cur.execute(
             "INSERT INTO atoms (version_id, document_id, atom_type, ordinal, content, metadata) "
@@ -669,6 +670,22 @@ def import_doc(pdf_path, project_name):
         print(f"      Нормализация: +{n_links} ссылок (итого {links})")
     except ImportError:
         pass  # normalize_links.py не рядом — не критично
+
+    if not getattr(import_doc, "_no_embed", False):
+        try:
+            from embed_atoms import embed_atoms_for_version
+
+            n_emb, ew = embed_atoms_for_version(version_id)
+            for w in ew:
+                print(w, file=sys.stderr)
+            if n_emb:
+                print(f"      Эмбеддинги: {n_emb} атомов", file=sys.stderr)
+        except Exception as e:
+            print(
+                f"      атомы сохранены без векторов: {e}; выполните scripts/embed_atoms.py",
+                file=sys.stderr,
+            )
+
     return len(enriched), links
 
 
@@ -676,6 +693,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--file", required=True)
     parser.add_argument("--project", default="default")
+    parser.add_argument("--no-embed", action="store_true", help="не считать эмбеддинги после импорта")
     args = parser.parse_args()
-    n, l = import_doc(args.file, args.project)
-    print(f"\n✅ Импортировано атомов: {n}, связей: {l}")
+    if args.no_embed:
+        import_doc._no_embed = True
+    n_atoms, n_links = import_doc(args.file, args.project)
+    print(f"\n✅ Импортировано атомов: {n_atoms}, связей: {n_links}")

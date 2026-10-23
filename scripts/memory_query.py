@@ -1,26 +1,20 @@
 #!/usr/bin/env python3
 """Быстрый поиск по атомной памяти агента (PostgreSQL, БД memory).
 
-Вызывается через триггеры «память:», «#память», «memory:» (скилл memory-query).
-
-  ~/hermes-env/bin/python3 ~/.hermes/scripts/memory_query.py "цифры 12 в номере ИКИ"
-  ~/hermes-env/bin/python3 ~/.hermes/scripts/memory_query.py "чувствительность ИКИ" --limit 8
-
-Логика: FTS по русским стемам (как в memory_mcp_server.py); если результатов
-мало — fallback ILIKE по значимым словам (включая числа: «12», «1.5»).
-Вывод — компактный, для дальнейшей сборки ответа агентом.
+  python3 memory_query.py "запрос" [--mode fts|vector|hybrid] [--project P] [--limit N]
 """
 import argparse
+import json
 import os
-import re
 import sys
 
 import psycopg2
 
-from _common import fts_query, ili_terms
+from _common import fts_query, ili_terms, linked_by_atom
+from search_core import hit_to_dict, search
 
 
-def get_dsn():
+def get_dsn_local():
     dsn = os.environ.get("PG_DSN")
     if dsn:
         return dsn
@@ -33,21 +27,10 @@ def get_dsn():
     raise SystemExit("PG_DSN не найден ни в окружении, ни в ~/.hermes/.env")
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Поиск по атомной памяти агента")
-    ap.add_argument("query", help="поисковый запрос")
-    ap.add_argument("--limit", type=int, default=5)
-    ap.add_argument("--project", default="")
-    args = ap.parse_args()
-
-    conn = psycopg2.connect(get_dsn())
-    cur = conn.cursor()
-
+def run_fts_legacy(cur, query: str, project: str, limit: int):
+    """Поведение v1.7/v1.8: только FTS + ILIKE, тот же формат вывода."""
     rows = []
-
-    # FTS по русским стемам. Пустой tsquery (только числа/стоп-слова) пропускаем:
-    # to_tsquery('') падает с syntax error, такие запросы уходят сразу в ILIKE.
-    tq = fts_query(args.query)
+    tq = fts_query(query)
     if tq:
         sql = """
             SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source,
@@ -60,46 +43,46 @@ def main():
               AND a.tsv @@ to_tsquery('public.ru_en', %s)
         """
         params = [tq, tq]
-        if args.project:
+        if project:
             sql += " AND s.project_id IN (SELECT id FROM projects WHERE name = %s)"
-            params.append(args.project)
+            params.append(project)
         sql += " ORDER BY rank DESC LIMIT %s"
-        params.append(args.limit)
+        params.append(limit)
         cur.execute(sql, params)
         rows = cur.fetchall()
 
-    if len(rows) < args.limit:
-        # Добираем ILIKE-выдачей (числа FTS не ловит), уже найденное не выбрасываем.
+    if len(rows) < limit:
         seen = {r[0] for r in rows}
-        terms = terms_for_ili(args.query)
+        terms = ili_terms(query)
         if terms:
             conds = " OR ".join(["a.content ILIKE %s" for _ in terms])
-            q = ("SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source, "
-                 "v.version_no, 0 AS rank "
-                 "FROM atoms a "
-                 "JOIN versions v ON a.version_id = v.id "
-                 "JOIN sources s ON a.document_id = s.id "
-                 "WHERE a.status = 'active' AND (" + conds + ")")
+            q = (
+                "SELECT a.id, a.atom_type, a.content, a.metadata, s.title AS source, "
+                "v.version_no, 0 AS rank "
+                "FROM atoms a "
+                "JOIN versions v ON a.version_id = v.id "
+                "JOIN sources s ON a.document_id = s.id "
+                "WHERE a.status = 'active' AND (" + conds + ")"
+            )
             qparams = [f"%{t}%" for t in terms]
-            if args.project:
+            if project:
                 q += " AND s.project_id IN (SELECT id FROM projects WHERE name = %s)"
-                qparams.append(args.project)
+                qparams.append(project)
             q += " ORDER BY a.id LIMIT %s"
-            qparams.append(args.limit)
+            qparams.append(limit)
             cur.execute(q, qparams)
             for r in cur.fetchall():
-                if r[0] not in seen and len(rows) < args.limit:
+                if r[0] not in seen and len(rows) < limit:
                     rows.append(r)
 
-    # Связанные атомы — одним запросом на всю выдачу, не N+1
-    from _common import linked_by_atom
     linked_map = linked_by_atom(cur, [r[0] for r in rows])
+    lines = []
     for aid, atype, content, meta, source, vno, rank in rows:
         page = (meta or {}).get("page") or "?"
         tags = (meta or {}).get("tags", [])
-        print(f"[{aid}] {source} v{vno} стр.{page} ({atype}) {content[:400]}")
+        lines.append(f"[{aid}] {source} v{vno} стр.{page} ({atype}) {content[:400]}")
         if tags:
-            print(f"    теги: {', '.join(tags[:8])}")
+            lines.append(f"    теги: {', '.join(tags[:8])}")
         for ttype, tcontent, tmeta in linked_map.get(aid, []):
             loc = ""
             if tmeta:
@@ -107,10 +90,98 @@ def main():
                     loc = f" табл.{tmeta['table_no']}"
                 elif tmeta.get("fig_no"):
                     loc = f" {tmeta['fig_no']}"
-            print(f"    ↳ {ttype}{loc}: {tcontent[:200]}")
-        print()
+            lines.append(f"    ↳ {ttype}{loc}: {tcontent[:200]}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + ("\n" if lines else "")
+
+
+def format_hybrid_hit(h) -> str:
+    page = (h.metadata or {}).get("page") or "?"
+    tags = (h.metadata or {}).get("tags", [])
+    mb = "+".join(h.matched_by) if h.matched_by else "?"
+    tail = f" [{mb}]"
+    if h.match_note:
+        tail += f" ({h.match_note})"
+    art = (h.metadata or {}).get("article")
+    sec = (h.metadata or {}).get("section_path")
+    extra = ""
+    if art:
+        extra += f" ст.{art}"
+    if sec:
+        extra += f" {sec}"
+    line = (
+        f"[{h.atom_id}] {h.source_title} v{h.version_no} стр.{page}{extra} "
+        f"({h.atom_type}) {h.content[:400]}{tail}"
+    )
+    out = [line]
+    if tags:
+        out.append(f"    теги: {', '.join(tags[:8])}")
+    for link in h.links:
+        loc = link.get("table_no") or link.get("fig_no") or ""
+        out.append(f"    ↳ {link.get('type')} {loc}: {(link.get('content') or '')[:200]}")
+    out.append("")
+    return "\n".join(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Поиск по атомной памяти агента")
+    ap.add_argument("query", help="поисковый запрос")
+    ap.add_argument("--limit", type=int, default=5)
+    ap.add_argument("--project", default="")
+    ap.add_argument("--mode", default=os.environ.get("SEARCH_MODE", "hybrid"),
+                    choices=["fts", "vector", "hybrid"])
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("--explain", action="store_true")
+    args = ap.parse_args()
+
+    dsn = get_dsn_local()
+    conn = psycopg2.connect(dsn)
+    cur = conn.cursor()
+
+    if args.mode == "fts":
+        out = run_fts_legacy(cur, args.query, args.project, args.limit)
+        cur.close()
+        conn.close()
+        sys.stdout.write(out)
+        return
 
     cur.close()
+    sr = search(
+        conn,
+        args.query,
+        project=args.project or None,
+        limit=args.limit,
+        mode=args.mode,
+    )
+    for w in sr.warnings:
+        print(w, file=sys.stderr)
+
+    if args.json:
+        payload = {
+            "results": [hit_to_dict(h) for h in sr.results],
+            "warnings": sr.warnings,
+            "mode_used": sr.mode_used,
+            "legs": sr.legs,
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        conn.close()
+        return
+
+    if not sr.results:
+        print("Ничего не найдено.")
+        conn.close()
+        return
+
+    if args.explain:
+        print(f"mode={sr.mode_used} legs={sr.legs}", file=sys.stderr)
+        for h in sr.results:
+            print(
+                f"  id={h.atom_id} score={h.score:.4f} ranks={h.ranks} sim={h.similarity} exact={h.exact}",
+                file=sys.stderr,
+            )
+
+    for h in sr.results:
+        print(format_hybrid_hit(h), end="")
     conn.close()
 
 

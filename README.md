@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%2B-336791.svg)](https://www.postgresql.org/)
-[![pgvector](https://img.shields.io/badge/pgvector-0.7%2B-316192.svg)](https://github.com/pgvector/pgvector)
+[![pgvector](https://img.shields.io/badge/pgvector-0.5%2B%20(%E2%89%A50.8%20rec.)-316192.svg)](https://github.com/pgvector/pgvector)
 
 A self-contained **Hermes skill** (schema + scripts + deployment procedure) that turns any PostgreSQL into a knowledge base your agent can actually rely on. Instead of storing documents as whole "books", it cuts them into **atoms** — indivisible units of meaning — so retrieval is precise, answers are sourced, and nothing gets invented.
 
@@ -36,7 +36,7 @@ hermes skills install https://raw.githubusercontent.com/KalkulatorRK/atom-memory
 ---
 
 
-> **What is and is not implemented.** Search is full-text (`ru_en` stemming) plus an ILIKE fallback. The `embeddings` table and the pgvector badge are a placeholder: no script writes or reads vectors yet. The `journal` table records imports. Document text is sent to an external LLM only when `LLM_API_KEY` is set; without it import works and atoms simply have no tags.
+> **Search.** Default mode is **hybrid**: FTS (`ru_en`) + ILIKE + pgvector semantic leg merged with RRF. `--mode fts` keeps legacy full-text-only behavior. Without `EMBED_API_KEY` (and without explicit `EMBED_PROVIDER=local`) the vector leg is disabled with a warning. Embeddings use `EMBED_API_KEY`, not `LLM_API_KEY`. See `.env.example`.
 
 ## Why
 
