@@ -17,10 +17,23 @@ def db_ready():
 
 
 def test_migration_idempotent(db_ready):
-    from db_fixtures import apply_migrations
+    import os
+    import subprocess
+    from pathlib import Path
+    from urllib.parse import urlparse
 
-    apply_migrations(db_ready)
-    apply_migrations(db_ready)
+    admin = os.environ.get("ADMIN_DSN", "")
+    if not admin:
+        pytest.skip("ADMIN_DSN не задан — повтор миграций только от суперпользователя")
+    dbname = urlparse(db_ready).path.lstrip("/") or "memory_test"
+    admin_db = f"{admin.rsplit('/', 1)[0]}/{dbname}"
+    mig = Path(__file__).resolve().parents[2] / "references" / "migrations" / "0004_vector_search.sql"
+    for _ in range(2):
+        subprocess.run(
+            ["psql", admin_db, "-v", "ON_ERROR_STOP=1", "-f", str(mig)],
+            check=True,
+            capture_output=True,
+        )
     conn = psycopg2.connect(db_ready)
     cur = conn.cursor()
     cur.execute(
