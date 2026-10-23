@@ -274,41 +274,58 @@ def detect_doc_kind(text: str, title: str, explicit: str) -> str | None:
 
 
 def _meta_source_text(text: str, source_title: str) -> str:
-    """Сырой текст первой страницы для извлечения law/redaction/effective_date."""
+    """Текст первой страницы для извлечения law/redaction/effective_date (без дубля title)."""
     chunk = text
     m = re.search(r"<!--\s*страница\s+2\s*-->", text)
     if m:
         chunk = text[: m.start()]
     elif len(chunk) > 12000:
         chunk = chunk[:12000]
-    return f"{source_title}\n\n{chunk}"
+    return chunk
+
+
+def _meta_preamble_text(text: str, source_title: str) -> str:
+    """Вся шапка первой страницы до первой структурной границы (для regex метаданных)."""
+    from structure_headings import (
+        RE_ARTICLE_BARE,
+        RE_ARTICLE_HEADING_STRICT,
+        is_strict_code_volume_heading,
+    )
+
+    title = (source_title or "").strip()
+    parts: list[str] = [title] if title else []
+    for para in text.split("\n\n"):
+        body = PAGE_MARK.sub("", para).strip()
+        if not body or body == title:
+            continue
+        first = body.split("\n")[0].strip()
+        if not first or first.startswith("<!--"):
+            continue
+        if RE_ARTICLE_HEADING_STRICT.match(first) or RE_ARTICLE_BARE.match(first):
+            break
+        if is_strict_code_volume_heading(first):
+            break
+        if re.match(r"^\d+\.\s+[A-ZА-ЯЁ«\"(0-9]", first):
+            break
+        if re.match(r"^\d+(?:\.\d+)+\s+[A-ZА-ЯЁ«\"(0-9]", first):
+            break
+        if re.match(r"^\d+\s+[A-ZА-ЯЁ«\"(0-9]", first) and not RE_FZ_LINE.match(first):
+            break
+        parts.append(body)
+        if len("\n\n".join(parts)) > 4000:
+            break
+    return "\n\n".join(parts)
 
 
 def _document_header_blob(text: str, source_title: str) -> str:
-    """Шапка: title + короткий преамбульный блок до первой структуры."""
-    from structure_headings import RE_ARTICLE_BARE, RE_ARTICLE_HEADING_STRICT
-
-    chunks = [source_title]
-    for para in text.split("\n\n"):
-        first = para.strip().split("\n")[0].strip() if para.strip() else ""
-        if RE_ARTICLE_HEADING_STRICT.match(first) or RE_ARTICLE_BARE.match(first):
-            break
-        if re.match(r"^\d+\.\s+[A-ZА-ЯЁ]", first):
-            break
-        if re.match(r"^\d+(?:\.\d+)+\s+[A-ZА-ЯЁ]", first):
-            break
-        if re.match(r"^\d+\s+[A-ZА-ЯЁ]", first) and not RE_FZ_LINE.match(first):
-            break
-        chunks.append(para)
-        if len(chunks) >= 3 or len("\n\n".join(chunks)) > 1200:
-            break
-    return "\n\n".join(chunks)
+    """Шапка: title + преамбула до первой структуры (совместимость)."""
+    return _meta_preamble_text(text, source_title)
 
 
 def extract_document_meta(
     text: str, options: DocImportOptions
 ) -> tuple[str | None, str | None, str | None, str | None, str | None]:
-    header = _document_header_blob(text, options.source_title)
+    header = _meta_preamble_text(text, options.source_title)
     red = options.redaction
     eff = normalize_date(options.effective_date)
     if not red:
@@ -891,6 +908,10 @@ def structure_split(
                 or is_structure_heading_line(line)
                 or RE_POINT.match(line)
                 or RE_SUBPOINT.match(line)
+                or (
+                    cur_ctx.doc_kind in ("gost", "sdank")
+                    and RE_GOST_SECTION_STRICT.match(line)
+                )
             ):
                 in_title_block = False
             running = same_chapter_colontitel or is_running_header_line(

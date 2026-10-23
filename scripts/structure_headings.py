@@ -285,6 +285,9 @@ RE_TITLE_DATE_WRAP_TAIL = re.compile(
     r"^\d{1,2}\.\d{1,2}\.\d{2,4}\)\s*$"
 )
 RE_RED_OT_INLINE = re.compile(r"(?i)\(\s*ред\.\s+от")
+RE_DOC_STANDARD_TITLE_LINE = re.compile(
+    r"(?i)^(?:ГОСТ(?:\s*Р)?\s*[\d][\d.\w\-]*|СДАНК[-\w]+|ISO\s*[-\d][-\w]*)"
+)
 
 
 def is_consultant_header_wrap_fragment(s: str) -> bool:
@@ -362,7 +365,15 @@ def is_consultant_running_header_prefix(s: str) -> bool:
 def is_document_title_line(s: str) -> bool:
     """Титул/шапка первой страницы — не колонтитул для среза."""
     s = s.strip()
-    if not s or is_paren_boundary_line(s):
+    if not s:
+        return False
+    if RE_DOC_STANDARD_TITLE_LINE.match(s):
+        return True
+    if s.startswith("("):
+        if RE_RED_OT_INLINE.search(s):
+            return True
+        if RE_PAREN_BOUNDARY.match(s):
+            return False
         return False
     if RE_RED_OT_INLINE.search(s) or re.search(
         r"(?i)\bN\s+\d+(?:\.\d+)?-ФЗ\b", s
