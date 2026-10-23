@@ -368,9 +368,13 @@ def _update_ctx_from_paragraph(
     m = RE_CHAPTER.match(s)
     if m:
         ctx.chapter = m.group(1)
+        if heading_state is not None and ctx.doc_kind == "code":
+            heading_state.allow_large_forward = True
         return ctx.doc_kind == "code"
 
     if ctx.doc_kind == "code" and RE_PARAGRAPH_SECTION.match(s):
+        if heading_state is not None:
+            heading_state.allow_large_forward = True
         return True
 
     m = RE_PART.match(s)
@@ -384,6 +388,8 @@ def _update_ctx_from_paragraph(
         return False
 
     if RE_SECTION_CODE.match(s):
+        if heading_state is not None and ctx.doc_kind == "code":
+            heading_state.allow_large_forward = True
         return ctx.doc_kind == "code"
 
     m = RE_ANNEX.match(s)
@@ -633,7 +639,8 @@ def structure_split(
             block_start_page = cur_page
             line_state.after_page_break = True
         else:
-            line_state.after_page_break = False
+            if not line_state.preserve_page_break:
+                line_state.after_page_break = False
         lines = _expand_structure_lines(
             para,
             heading_state=heading_state,
@@ -654,7 +661,13 @@ def structure_split(
                 banner_ctx.point = None
                 banner_ctx.subpoint = None
                 blocks.append((banner_ctx, line, block_start_page))
+                line_state.preserve_page_break = (
+                    line_state.after_page_break or line_state.preserve_page_break
+                )
                 continue
+            if line_state.preserve_page_break:
+                line_state.after_page_break = True
+                line_state.preserve_page_break = False
             update_toc_state(line_state, line)
             new_ctx = cur_ctx.copy()
             hard = _update_ctx_from_paragraph(

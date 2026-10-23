@@ -27,12 +27,18 @@ RE_SUBSECTION_HEADING = re.compile(
 )
 RE_PARAGRAPH_SECTION = re.compile(r"^§\s*\d+(?:\.\d+)*\.", re.UNICODE)
 
-RE_CONSULTANT_BANNER = re.compile(
-    r"(?:документ\s+предоставлен\s+)?консультант\s*плюс|"
-    r"дата\s+сохранения|consultant\.ru|надежная\s+правовая\s+поддержка|"
-    r"\bгарант\b.*(?:правов|online)",
+BANNER_MAX_LEN = 120
+RE_CONSULTANT_BANNER_START = re.compile(
+    r"^(?:документ\s+предоставлен\s+)?консультант\s*плюс",
     re.IGNORECASE,
 )
+RE_CONSULTANT_DATE_START = re.compile(r"^дата\s+сохранения", re.IGNORECASE)
+RE_CONSULTANT_SUPPORT_START = re.compile(
+    r"^консультант\s*плюс\s+надежная\s+правовая\s+поддержка",
+    re.IGNORECASE,
+)
+RE_CONSULTANT_URL_START = re.compile(r"^(?:https?://|www\.)consultant\.ru", re.IGNORECASE)
+RE_GOST_NUMBERED_SECTION = re.compile(r"^\d+(?:\.\d+)*\s+\S")
 RE_PAGE_COUNT_LINE = re.compile(
     r"(?i)^(?:страница|стр\.?)\s*\d+\s*(?:из|/)\s*\d+\s*$"
 )
@@ -72,6 +78,9 @@ class ArticleHeadingState:
     after_toc_restart: bool = False
     in_toc_run: bool = False
     consecutive_heading_lines: int = 0
+    false_forward_anchor: tuple[int, ...] | None = None
+    false_forward_spurious: tuple[int, ...] | None = None
+    allow_large_forward: bool = False
 
 
 @dataclass
@@ -81,6 +90,7 @@ class StructureLineState:
     prev_line: str = ""
     at_doc_start: bool = True
     after_page_break: bool = False
+    preserve_page_break: bool = False
     heading: ArticleHeadingState = field(default_factory=ArticleHeadingState)
     prev_was_structure_heading: bool = False
 
@@ -141,9 +151,16 @@ def is_code_structure_boundary_line(s: str) -> bool:
 
 def is_running_header_line(s: str, *, repeated: bool = False) -> bool:
     s = s.strip()
-    if not s or s.startswith("<!--"):
+    if not s or s.startswith("<!--") or len(s) > BANNER_MAX_LEN:
         return False
-    if RE_CONSULTANT_BANNER.search(s):
+    if RE_GOST_NUMBERED_SECTION.match(s):
+        return False
+    if (
+        RE_CONSULTANT_BANNER_START.match(s)
+        or RE_CONSULTANT_DATE_START.match(s)
+        or RE_CONSULTANT_SUPPORT_START.match(s)
+        or RE_CONSULTANT_URL_START.match(s)
+    ):
         return True
     if RE_PAGE_COUNT_LINE.match(s):
         return True
@@ -275,6 +292,8 @@ def update_toc_state(line_state: StructureLineState, line: str) -> None:
     """TOC = 2+ подряд заголовков без тела; тело — рестарт N ≤ last (P2/Q4)."""
     s = line.strip()
     hs = line_state.heading
+    if is_paren_boundary_line(s):
+        return
     if RE_CHAPTER_HEADING.match(s) or RE_SUBSECTION_HEADING.match(s):
         if not hs.in_toc_run:
             hs.consecutive_heading_lines = 0
@@ -310,6 +329,25 @@ def update_toc_state(line_state: StructureLineState, line: str) -> None:
         hs.consecutive_heading_lines = 0
         return
     hs.consecutive_heading_lines = 0
+
+
+def _likely_false_forward_heading(
+    s: str,
+    num: tuple[int, ...],
+    last: tuple[int, ...],
+    *,
+    allow_large_forward: bool = False,
+) -> bool:
+    if allow_large_forward:
+        return False
+    if not (RE_ARTICLE_BARE.match(s) or RE_ARTICLE_HEADING_STRICT.match(s)):
+        return False
+    if len(num) == 1 and len(last) == 1 and num[0] - last[0] >= 5:
+        return True
+    if num > last and num[0] == last[0] and len(num) > 1 and len(last) > 1:
+        if num[-1] - last[-1] >= 5:
+            return True
+    return False
 
 
 def _accept_monotonic(
@@ -373,22 +411,46 @@ def accept_article_heading(
         and state.last_article is not None
         and not (num > state.last_article)
     )
+    if (
+        forward
+        and state.last_article is not None
+        and num is not None
+        and _likely_false_forward_heading(
+            s, num, state.last_article, allow_large_forward=state.allow_large_forward
+        )
+    ):
+        state.false_forward_anchor = state.last_article
+        state.false_forward_spurious = num
+        return None, None
+
     if needs_boundary and not toc_style and not forward:
         if not boundary_before_structure(
             line_state.prev_line, line_state=line_state
         ):
             return None, None
 
-    allow_restart = state.after_toc_restart and not lowercase
+    recover = (
+        state.false_forward_spurious is not None
+        and state.false_forward_anchor is not None
+        and num is not None
+        and state.false_forward_anchor < num < state.false_forward_spurious
+    )
+    allow_restart = (state.after_toc_restart and not lowercase) or recover
     if num is None or not _accept_monotonic(
         state, num, lowercase=lowercase, allow_restart=allow_restart
     ):
         return None, None
 
+    if recover:
+        state.false_forward_spurious = None
+        state.false_forward_anchor = None
+
     if toc_style and not state.in_toc_run:
         return None, None
 
     state.last_article = num
+    if state.allow_large_forward:
+        state.allow_large_forward = False
     if allow_restart:
         state.after_toc_restart = False
     tail = s.split(None, 2)
@@ -430,6 +492,16 @@ def accept_code_point_line(
     prev_r = prev.rstrip()
     if line_state.prev_was_structure_heading:
         return pid, kind
+    if RE_POINT_LINE.match(prev_r):
+        prev_pid = RE_POINT_LINE.match(prev_r).group(1)
+        if (
+            prev_pid.isdigit()
+            and pid.isdigit()
+            and "." not in prev_pid
+            and "." not in pid
+            and int(pid) == int(prev_pid) + 1
+        ):
+            return pid, kind
     if boundary_before_structure(prev, line_state=line_state):
         return pid, kind
     if prev_r and RE_REF_WORD_BEFORE_POINT.search(prev_r):

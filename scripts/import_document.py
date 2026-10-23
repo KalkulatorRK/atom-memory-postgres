@@ -128,6 +128,7 @@ def normalize_text(md: str) -> str:
     out = []
     buffer = []
     prev_raw = ""
+    merge_after_banner = False
     for line in lines:
         s = line.strip()
         if not s:
@@ -143,21 +144,52 @@ def normalize_text(md: str) -> str:
             out.append(s)
             prev_raw = s
             continue
-        prev_line, prev_was = normalize_prev_for_point(buffer, prev_raw)
         from structure_headings import (
             is_code_structure_boundary_line,
             is_running_header_line,
         )
+
+        if is_running_header_line(s):
+            if buffer:
+                out.append(' '.join(buffer))
+                buffer = []
+            out.append(s)
+            merge_after_banner = True
+            continue
+        if merge_after_banner and out:
+            from structure_headings import is_code_structure_boundary_line
+
+            pre_idx = len(out) - 2
+            while pre_idx >= 0 and (
+                is_running_header_line(out[pre_idx])
+                or out[pre_idx].startswith('<!--')
+            ):
+                pre_idx -= 1
+            if pre_idx >= 0 and not (
+                s.startswith('<!--')
+                or re.match(r'^(?:Статья|СТАТЬЯ)\s+\d', s)
+                or is_code_structure_boundary_line(s)
+                or is_paren_boundary_line(s)
+                or RE_ARTICLE_BARE.match(s)
+                or _normalize_is_numbered_heading(
+                    s, out[pre_idx], prev_was_structure_heading=False
+                )
+            ):
+                out[pre_idx] = out[pre_idx] + ' ' + s
+                merge_after_banner = False
+                continue
+            merge_after_banner = False
+        prev_line, prev_was = normalize_prev_for_point(buffer, prev_raw)
+        heading_prev = ' '.join(buffer) if buffer else prev_line
 
         is_new_block = (
             s.startswith('<!--') or s.startswith('#') or s.startswith('- ') or
             s.startswith('* ') or s.startswith('|') or
             re.match(r'^(?:Статья|СТАТЬЯ)\s+\d', s) or
             is_code_structure_boundary_line(s) or
-            is_running_header_line(s) or
             is_paren_boundary_line(s) or
             _normalize_is_numbered_heading(
-                s, prev_line, prev_was_structure_heading=prev_was
+                s, heading_prev, prev_was_structure_heading=prev_was
             ) or
             s.startswith(('Приложение', 'ГОСТ', 'Таблица', 'Примечание', 'ПРИЛОЖЕНИЕ'))
         )
