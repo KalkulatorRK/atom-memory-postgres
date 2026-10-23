@@ -91,6 +91,18 @@ def pdf_to_text(pdf_path: str) -> str:
         f"<!-- страница {n} -->\n{t}" for n, t in pdf_to_pages(pdf_path) if t.strip())
 
 
+def _normalize_is_numbered_heading(s: str) -> bool:
+    if len(s) >= 120 or not s or not s[0].isdigit():
+        return False
+    if re.match(r"^\d+\s+Федерального\s+зак", s, re.IGNORECASE):
+        return False
+    m = re.match(r"^(\d+(?:\.\d+)*)\s+(\S)", s)
+    if not m:
+        return False
+    first_word = m.group(2)
+    return bool(re.match(r"^[A-ZА-ЯЁ«\"(0-9]", first_word))
+
+
 def normalize_text(md: str) -> str:
     """Склейка переносов строк внутри абзацев (PDF-колонки)."""
     lines = md.split('\n')
@@ -106,9 +118,10 @@ def normalize_text(md: str) -> str:
         is_new_block = (
             s.startswith('<!--') or s.startswith('#') or s.startswith('- ') or
             s.startswith('* ') or s.startswith('|') or
-            re.match(r'^(?:Статья|СТАТЬЯ|Глава|ГЛАВА|Раздел|РАЗДЕЛ|Часть)\s', s, re.IGNORECASE) or
-            len(s) < 120 and (s[0].isdigit() or
-                s.startswith(('Приложение', 'ГОСТ', 'Таблица', 'Примечание', 'ПРИЛОЖЕНИЕ')))
+            re.match(r'^(?:Статья|СТАТЬЯ)\s+\d', s) or
+            re.match(r'^(?:Глава|ГЛАВА|Раздел|РАЗДЕЛ|Часть)\s', s, re.IGNORECASE) or
+            _normalize_is_numbered_heading(s) or
+            s.startswith(('Приложение', 'ГОСТ', 'Таблица', 'Примечание', 'ПРИЛОЖЕНИЕ'))
         )
         if is_new_block and buffer:
             out.append(' '.join(buffer))

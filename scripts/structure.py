@@ -3,9 +3,17 @@ from __future__ import annotations
 
 import copy
 import re
+import sys
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
+
+from structure_headings import (
+    ArticleHeadingState,
+    accept_article_heading,
+    detect_lowercase_heading_style,
+    split_inline_article_segments,
+)
 
 PAGE_MARK = re.compile(r"<!-- страница (\d+) -->")
 COLONTITUL_LINE = re.compile(
@@ -18,9 +26,6 @@ COLONTITUL_TAIL = re.compile(
 )
 RE_ARTICLE = re.compile(
     r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)(?:[.\s—–-]\s*(.*))?$"
-)
-RE_ARTICLE_LOW = re.compile(
-    r"^статья\s+(\d+(?:\.\d+)?)\.\s+\S"
 )
 RE_CHAPTER = re.compile(r"^(?:Глава|ГЛАВА)\s+(\d+)", re.IGNORECASE)
 RE_PART = re.compile(
@@ -51,14 +56,22 @@ RE_LAW = re.compile(
     re.IGNORECASE,
 )
 RE_STANDARD_TITLE = re.compile(
-    r"\b((?:ГОСТ(?:\s*Р)?|СДАНК|СТО|ISO)\s*[-\w.]+)",
+    r"\b("
+    r"(?:ГОСТ(?:\s*Р)?\s*[-\d][-\w]*"
+    r"|СДАНК[-\w]+"
+    r"|СТО\s+(?:Газпром|[A-Za-zА-Яа-яЁё][\w\s-]*?)(?:\s+\d[\d.]*)?"
+    r"|ISO\s*[-\d][-\w]*)"
+    r")(?=[\s,.;]|$)",
     re.IGNORECASE,
+)
+RE_FZ_LINE = re.compile(r"^\d+\s+Федерального\s+зак", re.IGNORECASE)
+RE_DANGLING_REF = re.compile(
+    r"(?i)(?:статьей|статьи|статью|со|к)\s*$"
 )
 RE_ARTICLE_HEADING = re.compile(r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)\b")
 RE_ARTICLE_HEADING_CI = re.compile(
     r"^(?:Статья|СТАТЬЯ|статья)\s+(\d+(?:\.\d+)?)\b", re.IGNORECASE
 )
-RE_ARTICLE_INLINE = re.compile(r"(?<=[.;!?])\s+(?=(?:Статья|СТАТЬЯ)\s+\d+)")
 RE_CASUAL_ARTICLE = re.compile(r"(?:^|[\s,.;(])стать(?:я|и|ей|ю)\s+\d+")
 RE_GOST_SECTION_STRICT = re.compile(
     r"^(\d+(?:\.\d+){0,4})\s+([A-ZА-ЯЁ«\"].*)"
@@ -200,11 +213,13 @@ def _line_starts_article(line: str) -> bool:
 
 
 def _count_structural_articles(text: str) -> int:
-    """Заголовки «Статья N» / «статья N.» в начале строки."""
+    """Только capital «Статья N.» / «Статья N —» (не переносы PDF)."""
+    from structure_headings import RE_ARTICLE_HEADING_STRICT
+
     n = 0
     for line in text.split("\n"):
         s = line.strip()
-        if RE_ARTICLE_HEADING.match(s) or RE_ARTICLE_LOW.match(s):
+        if RE_ARTICLE_HEADING_STRICT.match(s):
             n += 1
     return n
 
@@ -251,6 +266,10 @@ def extract_document_meta(text: str, options: DocImportOptions) -> tuple[str | N
             if m:
                 eff = normalize_date(m.group(1))
                 break
+    if not eff and red:
+        m = RE_REDACTION.search(red)
+        if m:
+            eff = normalize_date(m.group(1))
     law = None
     standard = None
     m = RE_LAW.search(text[:5000]) or RE_LAW.search(options.source_title)
@@ -262,21 +281,30 @@ def extract_document_meta(text: str, options: DocImportOptions) -> tuple[str | N
     return red, eff, law if law else None, standard
 
 
-def _update_ctx_from_paragraph(ctx: StructureContext, para: str) -> bool:
+def _update_ctx_from_paragraph(
+    ctx: StructureContext,
+    para: str,
+    *,
+    heading_state: ArticleHeadingState | None = None,
+    prev_line: str = "",
+) -> bool:
     """Обновляет контекст; True если жёсткая граница (новый пункт/статья/раздел)."""
     hard = False
     s = para.strip()
     if not s or s.startswith("<!--"):
         return False
 
-    m = RE_ARTICLE.match(s) or RE_ARTICLE_LOW.match(s)
-    if m:
-        ctx.article = m.group(1)
-        title = m.group(2) if m.lastindex and m.lastindex >= 2 else None
-        ctx.article_title = (title or "").strip() or ctx.article_title
-        ctx.point = None
-        ctx.subpoint = None
-        return True
+    if heading_state is not None and ctx.doc_kind == "code":
+        num, title = accept_article_heading(
+            s, heading_state, doc_kind=ctx.doc_kind, prev_line=prev_line
+        )
+        if num:
+            ctx.article = num
+            if title:
+                ctx.article_title = title.strip()
+            ctx.point = None
+            ctx.subpoint = None
+            return True
 
     m = RE_CHAPTER.match(s)
     if m:
@@ -305,6 +333,8 @@ def _update_ctx_from_paragraph(ctx: StructureContext, para: str) -> bool:
 
     m = RE_GOST_SECTION_STRICT.match(s)
     if ctx.doc_kind in ("gost", "sdank") and m:
+        if RE_FZ_LINE.match(s) or RE_DANGLING_REF.search(prev_line.strip()):
+            return False
         num = m.group(1)
         depth = num.count(".")
         path = ctx.section_path or []
@@ -330,21 +360,35 @@ def _update_ctx_from_paragraph(ctx: StructureContext, para: str) -> bool:
     return hard
 
 
-def _expand_structure_lines(para: str) -> list[str]:
-    """Разбивает только по заголовкам «Статья N» после конца предложения, не «статья N» в тексте."""
+def _expand_structure_lines(
+    para: str,
+    *,
+    heading_state: ArticleHeadingState | None = None,
+    doc_kind: str | None = None,
+) -> list[str]:
+    """Строки абзаца; capital «Статья» только после конца предложения (не «п. 3.»)."""
     out: list[str] = []
+    prev = ""
     for raw in para.split("\n"):
         line = raw.strip()
         if not line:
             continue
-        if RE_ARTICLE_HEADING.match(line) or RE_ARTICLE_LOW.match(line):
-            out.append(line)
-            continue
-        parts = RE_ARTICLE_INLINE.split(line)
-        for p in parts:
-            p = p.strip()
-            if p:
-                out.append(p)
+        if heading_state and doc_kind == "code":
+            peek = ArticleHeadingState(
+                last_article=heading_state.last_article,
+                lowercase_headings=heading_state.lowercase_headings,
+            )
+            num, _ = accept_article_heading(
+                line, peek, doc_kind=doc_kind, prev_line=prev
+            )
+            if num:
+                out.append(line)
+                prev = line
+                continue
+        for seg in split_inline_article_segments(line):
+            if seg:
+                out.append(seg)
+                prev = seg
     return out or ([para.strip()] if para.strip() else [])
 
 
@@ -422,12 +466,16 @@ def structure_split(
             continue
         paragraphs.append((page, body))
 
+    heading_state = ArticleHeadingState(
+        lowercase_headings=detect_lowercase_heading_style(text)
+    )
     blocks: list[tuple[StructureContext, str, int | None]] = []
     cur_ctx = ctx.copy()
     cur_page = page
     block_start_page = page
     cur_parts: list[str] = []
     cur_key = cur_ctx.boundary_key()
+    prev_line = ""
 
     def flush():
         nonlocal cur_parts, block_start_page
@@ -443,10 +491,15 @@ def structure_split(
             cur_page = pg
             cur_ctx.page = pg
             block_start_page = cur_page
-        lines = _expand_structure_lines(para)
+        lines = _expand_structure_lines(
+            para, heading_state=heading_state, doc_kind=cur_ctx.doc_kind
+        )
         for line in lines:
             new_ctx = cur_ctx.copy()
-            hard = _update_ctx_from_paragraph(new_ctx, line)
+            hard = _update_ctx_from_paragraph(
+                new_ctx, line, heading_state=heading_state, prev_line=prev_line
+            )
+            prev_line = line
             new_key = new_ctx.boundary_key()
             if hard or (cur_parts and new_key != cur_key):
                 flush()
@@ -501,14 +554,17 @@ def build_page_context_map(text: str, ctx: StructureContext) -> dict[int, dict[s
     out: dict[int, dict[str, Any]] = {}
     cur = ctx.copy()
     page: int | None = None
+    hs = ArticleHeadingState(lowercase_headings=detect_lowercase_heading_style(text))
+    prev = ""
     for para in text.split("\n\n"):
         marks = PAGE_MARK.findall(para)
         if marks:
             page = int(marks[-1])
             cur.page = page
         body = PAGE_MARK.sub("", para).strip()
-        for line in _expand_structure_lines(body):
-            _update_ctx_from_paragraph(cur, line)
+        for line in _expand_structure_lines(body, heading_state=hs, doc_kind=cur.doc_kind):
+            _update_ctx_from_paragraph(cur, line, heading_state=hs, prev_line=prev)
+            prev = line
             if page is not None:
                 out[page] = cur.metadata()
     return out
@@ -530,6 +586,15 @@ def prepare_for_import(
     elif red:
         ctx.redaction_source = "auto"
     page_map = build_page_context_map(cleaned, ctx)
+    if (
+        ctx.doc_kind == "code"
+        and not ctx.effective_date
+        and RE_REDACTION.search(cleaned[:8000])
+    ):
+        print(
+            "      ⚠ в тексте есть «ред. от …», но effective_date не задан — as-of может вести себя как для недатированного источника",
+            file=sys.stderr,
+        )
     return cleaned, ctx, page_map
 
 
@@ -541,7 +606,7 @@ def format_citation(meta: dict, source_title: str) -> str:
     red_part = f" ({red})" if red else ""
     kind = meta.get("doc_kind")
 
-    if kind == "code" or meta.get("article"):
+    if (kind == "code" or meta.get("article")) and kind not in ("gost", "sdank"):
         head = meta.get("law") or source_title
         parts = [head]
         if meta.get("article"):

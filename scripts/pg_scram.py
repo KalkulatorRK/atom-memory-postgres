@@ -9,6 +9,16 @@ import stringprep
 import unicodedata
 
 
+def _bidi_prohibited(s: str) -> bool:
+    """RFC 3454 §6 — запрет смешанных L/R без «sandwich» (упрощённо, как в SASLprep)."""
+    types = [unicodedata.bidirectional(c) for c in s if not c.isspace()]
+    if not types:
+        return False
+    has_l = any(t in ("L", "LRE", "LRO") for t in types)
+    has_r = any(t in ("R", "AL", "RLE", "RLO") for t in types)
+    return has_l and has_r
+
+
 def saslprep(password: str) -> str | None:
     """RFC 4013 SASLprep; None → caller uses raw password (как libpq)."""
     if password is None:
@@ -39,6 +49,8 @@ def saslprep(password: str) -> str | None:
             or stringprep.in_table_c9(ch)
         ):
             return None
+    if _bidi_prohibited(s):
+        return None
     return s
 
 
