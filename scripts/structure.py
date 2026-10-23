@@ -17,8 +17,10 @@ COLONTITUL_TAIL = re.compile(
     re.IGNORECASE,
 )
 RE_ARTICLE = re.compile(
-    r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)(?:[.\s—–-]\s*(.*))?$",
-    re.IGNORECASE,
+    r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)(?:[.\s—–-]\s*(.*))?$"
+)
+RE_ARTICLE_LOW = re.compile(
+    r"^статья\s+(\d+(?:\.\d+)?)\.\s+\S"
 )
 RE_CHAPTER = re.compile(r"^(?:Глава|ГЛАВА)\s+(\d+)", re.IGNORECASE)
 RE_PART = re.compile(
@@ -56,9 +58,7 @@ RE_ARTICLE_HEADING = re.compile(r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)
 RE_ARTICLE_HEADING_CI = re.compile(
     r"^(?:Статья|СТАТЬЯ|статья)\s+(\d+(?:\.\d+)?)\b", re.IGNORECASE
 )
-RE_ARTICLE_INLINE = re.compile(
-    r"(?<=[.;!?])\s+(?=(?:Статья|СТАТЬЯ)\s+\d+)", re.IGNORECASE
-)
+RE_ARTICLE_INLINE = re.compile(r"(?<=[.;!?])\s+(?=(?:Статья|СТАТЬЯ)\s+\d+)")
 RE_CASUAL_ARTICLE = re.compile(r"(?:^|[\s,.;(])стать(?:я|и|ей|ю)\s+\d+")
 RE_GOST_SECTION_STRICT = re.compile(
     r"^(\d+(?:\.\d+){0,4})\s+([A-ZА-ЯЁ«\"].*)"
@@ -200,10 +200,11 @@ def _line_starts_article(line: str) -> bool:
 
 
 def _count_structural_articles(text: str) -> int:
-    """Заголовки «Статья N» в начале строки (не «статья N договора»)."""
+    """Заголовки «Статья N» / «статья N.» в начале строки."""
     n = 0
     for line in text.split("\n"):
-        if RE_ARTICLE_HEADING.match(line.strip()):
+        s = line.strip()
+        if RE_ARTICLE_HEADING.match(s) or RE_ARTICLE_LOW.match(s):
             n += 1
     return n
 
@@ -228,12 +229,12 @@ def detect_doc_kind(text: str, title: str, explicit: str) -> str | None:
     sample = f"{title}\n{text[:8000]}"
     if _count_structural_articles(text) >= 2:
         return "code"
-    if RE_CASUAL_ARTICLE.search(text):
-        return None
     if re.search(r"(?i)\bСДАНК\b", sample):
         return "sdank"
-    if re.search(r"(?i)\bГОСТ(?:\s*Р)?\b", sample) and _count_gost_sections(text) >= 2:
+    if re.search(r"(?i)\b(?:ГОСТ(?:\s*Р)?|СТО)\b", sample) and _count_gost_sections(text) >= 2:
         return "gost"
+    if RE_CASUAL_ARTICLE.search(text):
+        return None
     return None
 
 
@@ -268,10 +269,11 @@ def _update_ctx_from_paragraph(ctx: StructureContext, para: str) -> bool:
     if not s or s.startswith("<!--"):
         return False
 
-    m = RE_ARTICLE.match(s)
+    m = RE_ARTICLE.match(s) or RE_ARTICLE_LOW.match(s)
     if m:
         ctx.article = m.group(1)
-        ctx.article_title = (m.group(2) or "").strip() or ctx.article_title
+        title = m.group(2) if m.lastindex and m.lastindex >= 2 else None
+        ctx.article_title = (title or "").strip() or ctx.article_title
         ctx.point = None
         ctx.subpoint = None
         return True
@@ -329,20 +331,20 @@ def _update_ctx_from_paragraph(ctx: StructureContext, para: str) -> bool:
 
 
 def _expand_structure_lines(para: str) -> list[str]:
+    """Разбивает только по заголовкам «Статья N» после конца предложения, не «статья N» в тексте."""
     out: list[str] = []
     for raw in para.split("\n"):
         line = raw.strip()
         if not line:
             continue
+        if RE_ARTICLE_HEADING.match(line) or RE_ARTICLE_LOW.match(line):
+            out.append(line)
+            continue
         parts = RE_ARTICLE_INLINE.split(line)
         for p in parts:
             p = p.strip()
-            if not p:
-                continue
-            for seg in re.split(r"(?=(?:(?:Статья|СТАТЬЯ)\s+\d+))", p, flags=re.IGNORECASE):
-                seg = seg.strip()
-                if seg:
-                    out.append(seg)
+            if p:
+                out.append(p)
     return out or ([para.strip()] if para.strip() else [])
 
 

@@ -74,6 +74,12 @@ def _seed_atom(conn, content: str):
             {"article": "475", "point": "2", "doc_kind": "code", "law": "ГК РФ"},
             "пункт два",
         ),
+        ("ст. 12", {"article": "12", "doc_kind": "code", "law": "ГК РФ"}, "12"),
+        (
+            "v11",
+            {"article": "475", "doc_kind": "code", "law": "ГК РФ", "redaction": "v11"},
+            "v11",
+        ),
     ],
 )
 def test_hybrid_identifier_exact_tier_ranks_first(conn, query, meta, needle):
@@ -124,7 +130,10 @@ def test_hybrid_identifier_exact_tier_ranks_first(conn, query, meta, needle):
     )
     assert sr.results, f"no hits for {query!r}"
     assert sr.results[0].atom_id == target_id
-    assert sr.results[0].exact is True
+    if query in ("ГОСТ 7512-82", "v11"):
+        assert sr.results[0].exact is False
+    else:
+        assert sr.results[0].exact is True
 
 
 def test_exact_match_python_word_boundaries():

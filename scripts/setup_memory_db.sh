@@ -50,7 +50,7 @@ set_db_role_password() {
   sql="$(DB_USER="$DB_USER" MEMORY_DB_PASSWORD="$DB_PASS" python3 "$SCRIPT_DIR/render_role_password_sql.py")"
   # SET LOCAL может быть недоступен CREATEROLE — не роняем setup; SCRAM уже без plaintext.
   if ! printf '%s\n' "$sql" | admin_psql postgres -v ON_ERROR_STOP=1 -f -; then
-    printf '%s\n' "$sql" | admin_psql postgres -f - || return 1
+    return 1
   fi
 }
 

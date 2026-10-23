@@ -101,6 +101,27 @@ def test_role_password_special_chars(admin_db, db_ready, password):
             pwn.unlink()
 
 
+@pytest.mark.parametrize(
+    "password",
+    [
+        "cafe\u0301",  # NFD é
+        "\ufb01",  # fi ligature
+        "\u00a0secret",  # NBSP
+        "\uff11\uff12\uff13",  # full-width 123
+    ],
+)
+def test_role_password_unicode_saslprep(admin_db, db_ready, password):
+    role = f"uni_{uuid.uuid4().hex[:12]}"
+    pw = f"{password}__{uuid.uuid4().hex[:6]}"
+    try:
+        proc = _run_role_sql(admin_db, role, pw)
+        assert proc.returncode == 0, proc.stderr
+        conn = psycopg2.connect(_login_dsn(role, pw, db_ready))
+        conn.close()
+    finally:
+        _drop_role(admin_db, role)
+
+
 def test_shell_injection_repro_password(admin_db, db_ready):
     """Регрессия B2: $$ + \\! не создаёт файл."""
     role = f"sec_{uuid.uuid4().hex[:12]}"

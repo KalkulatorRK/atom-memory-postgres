@@ -1,6 +1,7 @@
 """Гибридный поиск: FTS + ILIKE + vector, слияние RRF."""
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -59,6 +60,7 @@ class StructuredQuery:
     article: str | None = None
     point: str | None = None
     section: str | None = None
+    annex: str | None = None
 
 
 def parse_structured_query(query: str) -> StructuredQuery:
@@ -82,6 +84,9 @@ def parse_structured_query(query: str) -> StructuredQuery:
             sq.section = val
         else:
             sq.point = val
+    m_ann = re.search(r"(?i)приложени[ея]\s+([А-ЯA-Z])", working)
+    if m_ann:
+        sq.annex = m_ann.group(1).upper()
     if not sq.section and not sq.article and not sq.point:
         for m in re.finditer(r"\b(\d+(?:\.\d+){1,4})\b", working):
             sq.section = m.group(1)
@@ -119,23 +124,39 @@ def _meta_section_matches(meta: dict, section_id: str) -> bool:
     if isinstance(sp, list):
         if not sp:
             return False
-        leaf = sp[-1]
+        leaf = str(sp[-1])
         if leaf == section_id:
             return True
         if "." in section_id:
-            return leaf == section_id
-        # «п. 2» только для кодексов (point), не для «5.2» / «7.3.2»
+            return leaf == section_id or leaf.startswith(section_id + ".")
+        if len(sp) == 1 and sp[0] == section_id:
+            return True
         return False
     return str(sp) == section_id
+
+
+def _meta_point_matches(meta: dict, point_id: str) -> bool:
+    if str(meta.get("point") or "") == point_id:
+        return True
+    sp = meta.get("section_path")
+    if isinstance(sp, list) and sp:
+        if len(sp) == 1 and str(sp[0]) == point_id:
+            return True
+        leaf = str(sp[-1])
+        if leaf == point_id and "." not in leaf:
+            return True
+    return False
 
 
 def _exact_match_structured(meta: dict, sq: StructuredQuery) -> bool:
     meta = meta or {}
     if sq.article and str(meta.get("article")) != sq.article:
         return False
-    if sq.point and str(meta.get("point")) != sq.point:
+    if sq.point and not _meta_point_matches(meta, sq.point):
         return False
     if sq.section and not _meta_section_matches(meta, sq.section):
+        return False
+    if sq.annex and str(meta.get("annex") or "").upper() != sq.annex:
         return False
     if sq.standard:
         blob = " ".join(
@@ -144,18 +165,23 @@ def _exact_match_structured(meta: dict, sq: StructuredQuery) -> bool:
         ).lower()
         if sq.standard.lower() not in blob:
             return False
-    return any((sq.standard, sq.article, sq.point, sq.section))
+        if not (sq.article or sq.point or sq.section or sq.annex):
+            return False
+    if sq.annex or sq.article or sq.point or sq.section:
+        return True
+    return False
 
 
 def _exact_match(content: str, meta: dict, sq: StructuredQuery) -> bool:
     if _exact_match_structured(meta, sq):
         return True
-    if sq.article or sq.point or sq.section:
-        return False
-    if sq.standard:
-        text = (content or "").lower()
-        return sq.standard.lower() in text
     return False
+
+
+def _atom_status_sql(include_superseded: bool, as_of: str | None) -> str:
+    if include_superseded or as_of:
+        return ""
+    return " AND a.status = 'active'"
 
 
 def leg_metadata_ids(
@@ -166,22 +192,32 @@ def leg_metadata_ids(
     include_superseded: bool,
     meta_sql: str,
     meta_params: list,
+    as_of: str | None = None,
 ) -> list[int]:
-    if not any((sq.standard, sq.article, sq.point, sq.section)):
+    if not any((sq.standard, sq.article, sq.point, sq.section, sq.annex)):
         return []
     pf, pp = _project_filter(project)
-    status = "" if include_superseded else " AND a.status = 'active'"
+    status = _atom_status_sql(include_superseded, as_of)
     conds: list[str] = []
     params: list = []
     if sq.article:
         conds.append("a.metadata->>'article' = %s")
         params.append(sq.article)
     if sq.point:
-        conds.append("a.metadata->>'point' = %s")
-        params.append(sq.point)
+        conds.append(
+            "(a.metadata->>'point' = %s OR a.metadata->'section_path' = %s::jsonb "
+            "OR a.metadata->'section_path'->>-1 = %s)"
+        )
+        params.extend([sq.point, json.dumps([sq.point]), sq.point])
     if sq.section:
-        conds.append("a.metadata->'section_path'->>-1 = %s")
-        params.append(sq.section)
+        conds.append(
+            "(a.metadata->'section_path'->>-1 = %s "
+            "OR a.metadata->'section_path'->>-1 LIKE %s)"
+        )
+        params.extend([sq.section, sq.section + ".%"])
+    if sq.annex:
+        conds.append("upper(a.metadata->>'annex') = %s")
+        params.append(sq.annex.upper())
     if sq.standard:
         conds.append(
             "(a.metadata->>'standard' ILIKE %s OR a.metadata->>'law' ILIKE %s OR s.title ILIKE %s)"
@@ -245,20 +281,33 @@ def _metadata_filters(
     if as_of:
         parts.append(
             """
-            AND v.id = (
-              SELECT v2.id FROM versions v2
-              WHERE v2.source_id = s.id
-                AND EXISTS (
-                  SELECT 1 FROM atoms a2
-                  WHERE a2.version_id = v2.id AND a2.status = 'active'
-                    AND (a2.metadata->>'effective_date') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
-                    AND (a2.metadata->>'effective_date')::date <= %s::date
+            AND (
+              (
+                NOT EXISTS (
+                  SELECT 1 FROM versions vx
+                  JOIN atoms ax ON ax.version_id = vx.id
+                  WHERE vx.source_id = s.id
+                    AND COALESCE(ax.metadata->>'effective_date', '') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
                 )
-              ORDER BY (
-                SELECT max((a3.metadata->>'effective_date')::date)
-                FROM atoms a3 WHERE a3.version_id = v2.id AND a3.status = 'active'
-              ) DESC NULLS LAST, v2.version_no DESC
-              LIMIT 1
+                AND a.status = 'active'
+              )
+              OR v.id = (
+                SELECT v2.id FROM versions v2
+                WHERE v2.source_id = s.id
+                  AND EXISTS (
+                    SELECT 1 FROM atoms a2
+                    WHERE a2.version_id = v2.id
+                      AND (a2.metadata->>'effective_date') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                      AND (a2.metadata->>'effective_date')::date <= %s::date
+                  )
+                ORDER BY (
+                  SELECT max((a3.metadata->>'effective_date')::date)
+                  FROM atoms a3
+                  WHERE a3.version_id = v2.id
+                    AND (a3.metadata->>'effective_date') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                ) DESC NULLS LAST, v2.version_no DESC
+                LIMIT 1
+              )
             )
             """
         )
@@ -290,12 +339,13 @@ def leg_fts(
     include_superseded: bool,
     meta_sql: str = "",
     meta_params: list | None = None,
+    as_of: str | None = None,
 ):
     tq = fts_query(query)
     if not tq:
         return []
     pf, pp = _project_filter(project)
-    status = "" if include_superseded else " AND a.status = 'active'"
+    status = _atom_status_sql(include_superseded, as_of)
     mp = list(meta_params or [])
     sql = f"""
         SELECT a.id, ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) AS rank
@@ -318,12 +368,13 @@ def leg_ilike(
     include_superseded: bool,
     meta_sql: str = "",
     meta_params: list | None = None,
+    as_of: str | None = None,
 ):
     terms = ili_terms(query)
     if not terms:
         return []
     pf, pp = _project_filter(project)
-    status = "" if include_superseded else " AND a.status = 'active'"
+    status = _atom_status_sql(include_superseded, as_of)
     mp = list(meta_params or [])
     conds = " OR ".join(["a.content ILIKE %s" for _ in terms])
     sql = f"""
@@ -368,6 +419,7 @@ def leg_vector(
     warnings: list[str],
     meta_sql: str = "",
     meta_params: list | None = None,
+    as_of: str | None = None,
 ):
     model, dims = provider.space, provider.dims
     idx = _hnsw_index_name(model, dims)
@@ -378,7 +430,7 @@ def leg_vector(
     has_idx = cur.fetchone() is not None
 
     pf, pp = _project_filter(project)
-    status = "" if include_superseded else " AND a.status = 'active'"
+    status = _atom_status_sql(include_superseded, as_of)
     mp = list(meta_params or [])
     vec_lit = "[" + ",".join(str(float(x)) for x in qvec) + "]"
 
@@ -483,20 +535,20 @@ def search_fts_only(
     cur = conn.cursor(cursor_factory=RealDictCursor)
     ordered_ids: list[int] = []
     for aid in leg_metadata_ids(
-        leg_cur, sq, project, limit, False, meta_sql, meta_params
+        leg_cur, sq, project, limit, False, meta_sql, meta_params, as_of=as_of
     ):
         ordered_ids.append(aid)
     tq = fts_query(query)
     if tq:
         for aid, _ in leg_fts(
-            leg_cur, query, project, limit, False, meta_sql, meta_params
+            leg_cur, query, project, limit, False, meta_sql, meta_params, as_of=as_of
         ):
             if aid not in ordered_ids and len(ordered_ids) < limit:
                 ordered_ids.append(aid)
     if len(ordered_ids) < limit:
         seen = set(ordered_ids)
         for aid in leg_ilike(
-            leg_cur, query, project, limit, False, meta_sql, meta_params
+            leg_cur, query, project, limit, False, meta_sql, meta_params, as_of=as_of
         ):
             if aid not in seen and len(ordered_ids) < limit:
                 ordered_ids.append(aid)
@@ -523,7 +575,7 @@ def search_fts_only(
                 exact=exact,
             )
         )
-    if sq.article or sq.point or sq.section or sq.standard:
+    if sq.article or sq.point or sq.section or sq.annex:
         exact_tier = [h for h in hits if h.exact]
         other = [h for h in hits if not h.exact]
         hits = exact_tier + other
@@ -603,7 +655,14 @@ def search(
     leg_k = max(SEARCH_LEG_K, limit)
 
     meta_ids = leg_metadata_ids(
-        leg_cur, sq, project or None, leg_k, include_superseded, meta_sql, meta_params
+        leg_cur,
+        sq,
+        project or None,
+        leg_k,
+        include_superseded,
+        meta_sql,
+        meta_params,
+        as_of=as_of_resolved,
     )
     for i, aid in enumerate(meta_ids, 1):
         rank_maps.setdefault("meta", {})[aid] = i
@@ -617,6 +676,7 @@ def search(
             include_superseded,
             meta_sql,
             meta_params,
+            as_of=as_of_resolved,
         )
         legs["fts"] = len(fts_rows)
         for i, (aid, _) in enumerate(fts_rows, 1):
@@ -632,6 +692,7 @@ def search(
             include_superseded,
             meta_sql,
             meta_params,
+            as_of=as_of_resolved,
         )
         legs["ilike"] = len(ilike_ids)
         r0 = 1
@@ -685,6 +746,7 @@ def search(
                 warnings,
                 meta_sql,
                 meta_params,
+                as_of=as_of_resolved,
             )
             legs["vector"] = len(vrows)
             min_sim = min_similarity_for_space(provider.space)
@@ -763,7 +825,7 @@ def search(
     scored.sort(key=lambda x: (-x[0], x[1], x[2].atom_id))
     hits = [h for _, _, h in scored]
 
-    if sq.article or sq.point or sq.section or sq.standard:
+    if sq.article or sq.point or sq.section or sq.annex:
         exact_tier = [h for h in hits if h.exact]
         other = [h for h in hits if not h.exact]
         exact_tier.sort(key=lambda h: (-h.score, h.ranks.get("fts", 10**9), h.atom_id))
