@@ -173,16 +173,12 @@ def detect_doc_kind(text: str, title: str, explicit: str) -> str | None:
 
 
 def extract_document_meta(text: str, options: DocImportOptions) -> tuple[str | None, str | None, str | None]:
-    red_src = None
     red = options.redaction
     eff = normalize_date(options.effective_date)
-    if red:
-        red_src = "param"
-    else:
+    if not red:
         m = RE_REDACTION.search(text[:12000])
         if m:
             red = f"ред. от {m.group(1)}"
-            red_src = "auto"
     if not eff:
         m = RE_EFFECTIVE.search(text[:12000])
         if m:
@@ -291,7 +287,6 @@ def structure_split(
     """Нарезка с жёсткими границами структуры; длинные блоки режутся по предложениям."""
     paragraphs: list[tuple[int | None, str]] = []
     page: int | None = None
-    buf: list[str] = []
     for para in text.split("\n\n"):
         marks = PAGE_MARK.findall(para)
         if marks:

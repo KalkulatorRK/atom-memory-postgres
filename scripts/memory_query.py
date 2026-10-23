@@ -97,7 +97,6 @@ def run_fts_legacy(cur, query: str, project: str, limit: int):
 
 
 def format_hybrid_hit(h) -> str:
-    page = (h.metadata or {}).get("page") or "?"
     tags = (h.metadata or {}).get("tags", [])
     mb = "+".join(h.matched_by) if h.matched_by else "?"
     tail = f" [{mb}]"

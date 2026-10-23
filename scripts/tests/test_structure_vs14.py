@@ -12,10 +12,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from import_document import quality_gate, smart_split  # noqa: E402
 from render_role_password_sql import render_role_password_sql  # noqa: E402
-from search_core import _exact_match, extract_identifiers, search  # noqa: E402
+from search_core import _exact_match, extract_identifiers  # noqa: E402
 from structure import (  # noqa: E402
     DocImportOptions,
-    StructureContext,
     detect_doc_kind,
     format_citation,
     prepare_for_import,
