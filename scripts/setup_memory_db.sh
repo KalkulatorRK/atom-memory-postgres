@@ -45,6 +45,13 @@ set_db_role_password() {
     | admin_psql postgres -v ON_ERROR_STOP=1 -f -
 }
 
+# postgres OS user (sudo) не читает файлы в $HOME runner — подаём SQL через stdin.
+admin_psql_file() {
+  local db="$1"
+  local file="$2"
+  cat "$file" | admin_psql "$db" -v ON_ERROR_STOP=1 -f -
+}
+
 if [ -n "${SETUP_SKIP_INSTALL:-}" ]; then
   echo "[1/4] Пропуск установки (SETUP_SKIP_INSTALL=1)"
   echo "[2/4] Пропуск тюнинга конфига"
@@ -100,14 +107,14 @@ SCHEMA="$SCRIPT_DIR/../references/schema.sql"
 if admin_psql "$DB_NAME" -tAc "SELECT to_regclass('public.atoms') IS NOT NULL" | grep -q t; then
   echo "      База уже инициализирована — пропуск schema.sql (без потери данных)"
 else
-  admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -f "$SCHEMA"
+  admin_psql_file "$DB_NAME" "$SCHEMA"
 fi
 for MIGRATION in "$SCRIPT_DIR"/../references/migrations/*.sql; do
     [ -f "$MIGRATION" ] || continue
     case "$MIGRATION" in
       *_down.sql) continue ;;
     esac
-    admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -f "$MIGRATION"
+    admin_psql_file "$DB_NAME" "$MIGRATION"
 done
 
 admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
