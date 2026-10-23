@@ -7,6 +7,7 @@
 - `scripts/embed_atoms.py` (backfill, dry-run, политика проектов), интеграция с импортом (`--no-embed`).
 - Гибридный поиск `scripts/search_core.py` (FTS + ILIKE + vector, RRF, ярус точных идентификаторов).
 - CLI `--mode fts|vector|hybrid`, MCP-параметр `mode`, расширенный `memory_stats`.
+- MCP JSON-RPC `memory_search`: по умолчанию ответ — **JSON-массив хитов** (как в 1.8); объект `{results, warnings}` только если есть предупреждения.
 - `scripts/eval_search.py`, `scripts/bench_search.py`, `scripts/vector_index_admin.sh`, CI с `EMBED_PROVIDER=fake`.
 
 ## 1.8.0

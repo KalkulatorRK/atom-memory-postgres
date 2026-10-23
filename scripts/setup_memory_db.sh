@@ -78,9 +78,13 @@ if ! admin_psql postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAM
   admin_psql postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${DB_NAME}\""
 fi
 if ! admin_psql postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
-  admin_psql postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE \"${DB_USER}\" LOGIN PASSWORD '${DB_PASS}'"
+  admin_psql postgres -v ON_ERROR_STOP=1 -v db_user="$DB_USER" -v db_pass="$DB_PASS" <<'SQL'
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'db_user', :'db_pass') \gexec
+SQL
 else
-  admin_psql postgres -v ON_ERROR_STOP=1 -c "ALTER ROLE \"${DB_USER}\" PASSWORD '${DB_PASS}'"
+  admin_psql postgres -v ON_ERROR_STOP=1 -v db_user="$DB_USER" -v db_pass="$DB_PASS" <<'SQL'
+SELECT format('ALTER ROLE %I PASSWORD %L', :'db_user', :'db_pass') \gexec
+SQL
 fi
 admin_psql postgres -v ON_ERROR_STOP=1 \
   -v db_name="$DB_NAME" -v db_user="$DB_USER" <<'SQL'

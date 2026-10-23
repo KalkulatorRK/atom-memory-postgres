@@ -25,6 +25,10 @@ BEGIN
   DELETE FROM public.embeddings e
   USING public.embeddings e2
   WHERE e.atom_id = e2.atom_id AND e.model = e2.model AND e.dims = e2.dims AND e.id < e2.id;
+  GET DIAGNOSTICS v_del = ROW_COUNT;
+  IF v_del > 0 THEN
+    RAISE NOTICE '0004: удалено % дублей embeddings (оставлена строка с max(id))', v_del;
+  END IF;
 
   ALTER TABLE public.embeddings ALTER COLUMN atom_id SET NOT NULL;
   ALTER TABLE public.embeddings ALTER COLUMN vector SET NOT NULL;
@@ -49,6 +53,17 @@ BEGIN
   END IF;
 
   ALTER TABLE public.projects ADD COLUMN IF NOT EXISTS embed_policy text NOT NULL DEFAULT 'inherit';
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = '_0004_embed_policy_snapshot'
+  ) THEN
+    UPDATE public.projects p
+    SET embed_policy = s.embed_policy
+    FROM public._0004_embed_policy_snapshot s
+    WHERE p.id = s.project_id;
+    DROP TABLE public._0004_embed_policy_snapshot;
+    RAISE NOTICE '0004: восстановлены embed_policy из снимка отката';
+  END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'projects_embed_policy_check'
   ) THEN

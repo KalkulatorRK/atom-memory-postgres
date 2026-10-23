@@ -18,10 +18,18 @@ BEGIN
   ALTER TABLE public.embeddings DROP COLUMN IF EXISTS embed_meta;
   ALTER TABLE public.embeddings DROP COLUMN IF EXISTS updated_at;
 
+  DROP TABLE IF EXISTS public._0004_embed_policy_snapshot;
+  CREATE TABLE public._0004_embed_policy_snapshot AS
+    SELECT id AS project_id, embed_policy FROM public.projects;
+
   ALTER TABLE public.projects DROP CONSTRAINT IF EXISTS projects_embed_policy_check;
   ALTER TABLE public.projects DROP COLUMN IF EXISTS embed_policy;
 
   ALTER TABLE public.embeddings ALTER COLUMN vector TYPE public.vector(768);
   ALTER TABLE public.embeddings ALTER COLUMN atom_id DROP NOT NULL;
   ALTER TABLE public.embeddings ALTER COLUMN vector DROP NOT NULL;
+
+  DELETE FROM public.journal
+  WHERE op_type = 'migration' AND details->>'name' = '0004_vector_search';
+  RAISE NOTICE '0004 откат: запись journal для 0004_vector_search удалена';
 END $$;

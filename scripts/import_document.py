@@ -669,7 +669,7 @@ def import_doc(pdf_path, project_name):
         links += n_links
         print(f"      Нормализация: +{n_links} ссылок (итого {links})")
     except ImportError:
-        pass  # normalize_links.py не rядом — не критично
+        pass  # normalize_links.py не рядом — не критично
 
     if not getattr(import_doc, "_no_embed", False):
         try:

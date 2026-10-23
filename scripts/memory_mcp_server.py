@@ -29,6 +29,18 @@ def search_atoms(query: str, project: str = "", limit: int = 5, mode: str = "hyb
     return [hit_to_dict(h) for h in sr.results], sr.warnings
 
 
+def format_memory_search_response(res: list, warnings: list[str]) -> str:
+    """JSON-RPC text: массив хитов как в v1.8; объект с warnings — только если они есть."""
+    if warnings:
+        payload: dict = {"results": res, "warnings": warnings}
+        if not res:
+            payload["message"] = "ничего не найдено"
+        return json.dumps(payload, ensure_ascii=False)
+    if res:
+        return json.dumps(res, ensure_ascii=False)
+    return "ничего не найдено"
+
+
 def list_sources():
     conn = get_pg()
     cur = conn.cursor()
@@ -212,15 +224,7 @@ def _fallback_loop():
                     res, warnings = search_atoms(
                         args.get("query", ""), args.get("project", ""), limit, mode
                     )
-                    if res or not warnings:
-                        text = json.dumps(
-                            {"results": res, "warnings": warnings}, ensure_ascii=False
-                        )
-                    else:
-                        text = json.dumps(
-                            {"results": [], "warnings": warnings, "message": "ничего не найдено"},
-                            ensure_ascii=False,
-                        )
+                    text = format_memory_search_response(res, warnings)
                     _reply(rid, result={"content": [{"type": "text", "text": text}]})
                 else:
                     _reply(rid, error={"code": -32602, "message": f"Unknown tool: {name}"})

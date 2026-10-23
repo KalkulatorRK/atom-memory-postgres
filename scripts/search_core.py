@@ -84,7 +84,8 @@ def _exact_match(content: str, meta: dict, ids: list[tuple[str, str]]) -> bool:
             num = re.search(r"\d+(?:\.\d+)*", val)
             if num and meta.get("article") == num.group(0):
                 return True
-        pat = r"\m" + re.escape(val) + r"\M"
+        # Границы слова в Python (не PostgreSQL \m/\M)
+        pat = r"(?<!\w)" + re.escape(val) + r"(?!\w)"
         if re.search(pat, text, re.IGNORECASE | re.UNICODE):
             return True
     return False
@@ -172,8 +173,9 @@ def _pgvector_version(cur) -> tuple[str, float]:
 
 
 def _hnsw_index_name(model: str, dims: int) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", model.lower()).strip("_")
-    return f"idx_emb_hnsw_{slug}_{dims}"
+    from vector_index import hnsw_index_name
+
+    return hnsw_index_name(model, dims)
 
 
 def leg_vector(
@@ -287,6 +289,7 @@ def search_fts_only(
     limit: int = 10,
 ) -> SearchResult:
     """Только FTS + ILIKE, порядок как в v1.7 (без RRF)."""
+    leg_cur = conn.cursor()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     ordered_ids: list[int] = []
     tq = fts_query(query)
@@ -300,11 +303,11 @@ def search_fts_only(
               AND a.tsv @@ to_tsquery('public.ru_en', %s){pf}
             ORDER BY ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) DESC LIMIT %s
         """
-        cur.execute(sql, [tq, tq] + pp + [limit])
-        ordered_ids = [r[0] for r in cur.fetchall()]
+        leg_cur.execute(sql, [tq, tq] + pp + [limit])
+        ordered_ids = [r[0] for r in leg_cur.fetchall()]
     if len(ordered_ids) < limit:
         seen = set(ordered_ids)
-        for aid in leg_ilike(cur, query, project, limit, False):
+        for aid in leg_ilike(leg_cur, query, project, limit, False):
             if aid not in seen and len(ordered_ids) < limit:
                 ordered_ids.append(aid)
                 seen.add(aid)
@@ -342,6 +345,7 @@ def search_fts_only(
                 for t, c, m in lm.get(h.atom_id, [])
             ]
         lcur.close()
+    leg_cur.close()
     cur.close()
     return SearchResult(results=hits, warnings=[], mode_used="fts", legs={})
 

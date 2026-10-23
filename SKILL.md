@@ -57,11 +57,14 @@ sudo bash scripts/setup_memory_db.sh memory hermes 'ваш_пароль'
 
 ```bash
 for f in references/migrations/*.sql; do
+    case "$f" in *_down.sql) continue ;; esac
     sudo -u postgres psql -d memory -v ON_ERROR_STOP=1 -f "$f"
 done
 ```
 
-Файлы идемпотентны. Если `0003_location_unique.sql` падает с `duplicate key`,
+Файлы `*_down.sql` — **только ручной откат**, в цикл обновления не включать (иначе сбросятся `embed_policy`, HNSW и колонки embeddings).
+
+Миграции вперёд идемпотентны. Если `0003_location_unique.sql` падает с `duplicate key`,
 в базе два источника с одним путём — их надо слить до повторного прогона.
 
 ### 4. Переменные окружения

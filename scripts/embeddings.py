@@ -42,11 +42,21 @@ _logged_provider: str | None = None
 _cloud_warned = False
 
 
-def _env_int(name: str, default: int) -> int:
-    v = os.environ.get(name)
+def _env_int(name: str, default: int, env: dict | None = None) -> int:
+    e = env if env is not None else os.environ
+    v = e.get(name) if env is not None else os.environ.get(name)
     if v is None or v == "":
         return default
     return int(v)
+
+
+def _embed_api_key(e) -> str:
+    key = (e.get("EMBED_API_KEY") or "").strip()
+    if key:
+        return key
+    if e is os.environ:
+        return load_env_secret("EMBED_API_KEY")
+    return ""
 
 
 def _env_float(name: str, default: float) -> float:
@@ -447,7 +457,7 @@ def resolve_provider(env: dict | None = None) -> tuple[EmbeddingProvider | None,
 
     if prov == "local" and local_reason:
         strict = e.get("EMBED_STRICT_LOCAL", "").strip() == "1"
-        api_key = load_env_secret("EMBED_API_KEY")
+        api_key = _embed_api_key(e)
         if strict or not api_key:
             if strict:
                 warnings.append(
@@ -466,7 +476,7 @@ def resolve_provider(env: dict | None = None) -> tuple[EmbeddingProvider | None,
             f"используется облачный провайдер {host} — текст будет отправлен во внешний API"
         )
 
-    api_key = load_env_secret("EMBED_API_KEY")
+    api_key = _embed_api_key(e)
     auto_cloud = prov in ("auto", "cloud", "")
     if api_key and (auto_cloud or (prov == "local" and local_reason)):
         model = e.get("EMBED_MODEL", DEFAULT_CLOUD_MODEL)
@@ -475,13 +485,13 @@ def resolve_provider(env: dict | None = None) -> tuple[EmbeddingProvider | None,
                 api_key=api_key,
                 base_url=e.get("EMBED_BASE_URL", "https://api.openai.com/v1"),
                 model=model,
-                dims=_env_int("EMBED_DIMS", 768),
+                dims=_env_int("EMBED_DIMS", 768, e),
                 send_dimensions=e.get("EMBED_SEND_DIMENSIONS", "1") != "0",
-                batch_size=_env_int("EMBED_BATCH", 64),
-                max_batch_tokens=_env_int("EMBED_MAX_BATCH_TOKENS", 100_000),
-                timeout=float(e.get("EMBED_TIMEOUT", "30")),
-                max_retries=_env_int("EMBED_MAX_RETRIES", 5),
-                query_timeout=float(e.get("EMBED_QUERY_TIMEOUT", "5")),
+                batch_size=_env_int("EMBED_BATCH", 64, e),
+                max_batch_tokens=_env_int("EMBED_MAX_BATCH_TOKENS", 100_000, e),
+                timeout=float(e.get("EMBED_TIMEOUT", "30") or "30"),
+                max_retries=_env_int("EMBED_MAX_RETRIES", 5, e),
+                query_timeout=float(e.get("EMBED_QUERY_TIMEOUT", "5") or "5"),
             ),
             warnings,
         )
