@@ -91,18 +91,19 @@ def pdf_to_text(pdf_path: str) -> str:
         f"<!-- страница {n} -->\n{t}" for n, t in pdf_to_pages(pdf_path) if t.strip())
 
 
-def _normalize_is_numbered_heading(s: str) -> bool:
+def _normalize_is_numbered_heading(s: str, prev_line: str = "") -> bool:
+    from structure_headings import StructureLineState, accept_code_point_line
+
     if len(s) >= 120 or not s or not s[0].isdigit():
         return False
     if re.match(r"^\d+\s+Федерального\s+зак", s, re.IGNORECASE):
         return False
     if re.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}\b", s):
         return False
-    if re.match(r"^\d+\)\s+\S", s):
-        return True
-    if re.match(r"^\d+(?:\.\d+)+\.\s+\S", s):
-        return True
-    if re.match(r"^\d+\.\s+\S", s):
+    ls = StructureLineState(
+        prev_line=prev_line, at_doc_start=not prev_line.strip()
+    )
+    if accept_code_point_line(s, ls)[0]:
         return True
     m = re.match(r"^(\d+(?:\.\d+)*)\s+(\S)", s)
     if not m:
@@ -113,27 +114,39 @@ def _normalize_is_numbered_heading(s: str) -> bool:
 
 def normalize_text(md: str) -> str:
     """Склейка переносов строк внутри абзацев (PDF-колонки)."""
+    from structure_headings import RE_ARTICLE_BARE
+
     lines = md.split('\n')
     out = []
     buffer = []
+    prev_raw = ""
     for line in lines:
         s = line.strip()
         if not s:
             if buffer:
                 out.append(' '.join(buffer))
                 buffer = []
+            prev_raw = ""
             continue
+        if RE_ARTICLE_BARE.match(s):
+            if buffer:
+                out.append(' '.join(buffer))
+                buffer = []
+            out.append(s)
+            prev_raw = s
+            continue
+        prev_for_point = prev_raw if buffer else prev_raw
         is_new_block = (
             s.startswith('<!--') or s.startswith('#') or s.startswith('- ') or
             s.startswith('* ') or s.startswith('|') or
             re.match(r'^(?:Статья|СТАТЬЯ)\s+\d', s) or
-            re.match(r'^статья\s+\d+(?:\.\d+)*\.\s+[A-ZА-ЯЁ]', s) or
             re.match(r'^(?:Глава|ГЛАВА|Раздел|РАЗДЕЛ|Часть)\s', s, re.IGNORECASE) or
-            _normalize_is_numbered_heading(s) or
+            _normalize_is_numbered_heading(s, " ".join(buffer) if buffer else prev_for_point) or
             s.startswith(('Приложение', 'ГОСТ', 'Таблица', 'Примечание', 'ПРИЛОЖЕНИЕ'))
         )
         if is_new_block and buffer:
             out.append(' '.join(buffer))
+            prev_raw = buffer[-1] if buffer else prev_raw
             buffer = []
         buffer.append(s)
     if buffer:

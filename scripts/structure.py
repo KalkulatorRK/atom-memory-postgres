@@ -10,9 +10,13 @@ from typing import Any
 
 from structure_headings import (
     ArticleHeadingState,
+    StructureLineState,
     accept_article_heading,
+    accept_code_point_line,
     detect_lowercase_heading_style,
+    is_capital_article_heading,
     split_inline_article_segments,
+    update_toc_state,
 )
 
 PAGE_MARK = re.compile(r"<!-- страница (\d+) -->")
@@ -56,10 +60,10 @@ RE_LAW = re.compile(
     re.IGNORECASE,
 )
 RE_STANDARD_TITLE = re.compile(
-    r"\b("
+    r"(?<![а-яёa-z])("
     r"(?:ГОСТ(?:\s*Р)?\s*[-\d][-\w]*"
     r"|СДАНК[-\w]+"
-    r"|СТО\s+(?:Газпром\s+[\d][-\d.]+|\d+[-\d.]+|[A-Za-zА-Яа-яЁё][\w\s-]*[\d][-\d.]*)"
+    r"|(?-i:СТО)\s+(?:Газпром\s+[\d][-\d.]+|\d+[-\d.]+|[A-Za-zА-ЯЁ][\w\s-]*[\d][-\d.]*)"
     r"|ISO\s*[-\d][-\w]*)"
     r")(?=[\s,.;]|$)",
     re.IGNORECASE,
@@ -302,7 +306,7 @@ def extract_document_meta(
         meta_warn = meta_warn or "effective_in_body_ignored"
     law = None
     standard = None
-    for blob in (header, text[:8000], options.source_title):
+    for blob in (header, options.source_title):
         m = RE_LAW.search(blob)
         if m:
             law = re.sub(r"\s+", " ", m.group(1)).strip()
@@ -315,7 +319,7 @@ def extract_document_meta(
         if m:
             law = re.sub(r"\s+", " ", m.group(1)).strip()[:120]
             break
-    sm = RE_STANDARD_TITLE.search(header) or RE_STANDARD_TITLE.search(text[:8000])
+    sm = RE_STANDARD_TITLE.search(header)
     if not sm:
         sm = RE_STANDARD_TITLE.search(options.source_title)
     if sm:
@@ -329,6 +333,7 @@ def _update_ctx_from_paragraph(
     *,
     heading_state: ArticleHeadingState | None = None,
     prev_line: str = "",
+    line_state: StructureLineState | None = None,
 ) -> bool:
     """Обновляет контекст; True если жёсткая граница (новый пункт/статья/раздел)."""
     hard = False
@@ -337,8 +342,11 @@ def _update_ctx_from_paragraph(
         return False
 
     if heading_state is not None and ctx.doc_kind == "code":
+        ls = line_state if line_state is not None else StructureLineState(
+            prev_line=prev_line, at_doc_start=not prev_line.strip()
+        )
         num, title = accept_article_heading(
-            s, heading_state, doc_kind=ctx.doc_kind, prev_line=prev_line
+            s, heading_state, doc_kind=ctx.doc_kind, line_state=ls
         )
         if num:
             ctx.article = num
@@ -392,16 +400,18 @@ def _update_ctx_from_paragraph(
         ctx.point = None
         return True
 
-    m = RE_POINT.match(s)
-    if ctx.doc_kind == "code" and m:
-        ctx.point = m.group(1)
-        ctx.subpoint = None
-        return True
-
-    m = RE_SUBPOINT.match(s)
-    if ctx.doc_kind == "code" and m:
-        ctx.subpoint = m.group(1)
-        return True
+    if ctx.doc_kind == "code":
+        ls = line_state if line_state is not None else StructureLineState(
+            prev_line=prev_line, at_doc_start=not prev_line.strip()
+        )
+        pid, pkind = accept_code_point_line(s, ls)
+        if pid and pkind == "point":
+            ctx.point = pid
+            ctx.subpoint = None
+            return True
+        if pid and pkind == "subpoint":
+            ctx.subpoint = pid
+            return True
 
     return hard
 
@@ -411,10 +421,11 @@ def _expand_structure_lines(
     *,
     heading_state: ArticleHeadingState | None = None,
     doc_kind: str | None = None,
+    line_state: StructureLineState | None = None,
 ) -> list[str]:
     """Строки абзаца; capital «Статья» только после конца предложения (не «п. 3.»)."""
     out: list[str] = []
-    prev = ""
+    ls = line_state or StructureLineState()
     for raw in para.split("\n"):
         line = raw.strip()
         if not line:
@@ -423,18 +434,31 @@ def _expand_structure_lines(
             peek = ArticleHeadingState(
                 last_article=heading_state.last_article,
                 lowercase_headings=heading_state.lowercase_headings,
+                after_toc_restart=heading_state.after_toc_restart,
+                in_toc_run=heading_state.in_toc_run,
+            )
+            peek_ls = StructureLineState(
+                prev_line=ls.prev_line,
+                at_doc_start=ls.at_doc_start,
+                after_page_break=ls.after_page_break,
+                heading=peek,
+                prev_was_article_heading=ls.prev_was_article_heading,
             )
             num, _ = accept_article_heading(
-                line, peek, doc_kind=doc_kind, prev_line=prev
+                line, peek, doc_kind=doc_kind, line_state=peek_ls
             )
             if num:
                 out.append(line)
-                prev = line
+                ls.prev_line = line
+                ls.at_doc_start = False
+                ls.prev_was_article_heading = True
                 continue
         for seg in split_inline_article_segments(line):
             if seg:
                 out.append(seg)
-                prev = seg
+                ls.prev_line = seg
+                ls.at_doc_start = False
+                ls.prev_was_article_heading = is_capital_article_heading(seg)
     return out or ([para.strip()] if para.strip() else [])
 
 
@@ -515,13 +539,13 @@ def structure_split(
     heading_state = ArticleHeadingState(
         lowercase_headings=detect_lowercase_heading_style(text)
     )
+    line_state = StructureLineState(heading=heading_state)
     blocks: list[tuple[StructureContext, str, int | None]] = []
     cur_ctx = ctx.copy()
     cur_page = page
     block_start_page = page
     cur_parts: list[str] = []
     cur_key = cur_ctx.boundary_key()
-    prev_line = ""
 
     def flush():
         nonlocal cur_parts, block_start_page
@@ -537,15 +561,33 @@ def structure_split(
             cur_page = pg
             cur_ctx.page = pg
             block_start_page = cur_page
+            line_state.after_page_break = True
+        else:
+            line_state.after_page_break = False
         lines = _expand_structure_lines(
-            para, heading_state=heading_state, doc_kind=cur_ctx.doc_kind
+            para,
+            heading_state=heading_state,
+            doc_kind=cur_ctx.doc_kind,
+            line_state=line_state,
         )
         for line in lines:
+            update_toc_state(line_state, line)
             new_ctx = cur_ctx.copy()
+            art_before = cur_ctx.article
             hard = _update_ctx_from_paragraph(
-                new_ctx, line, heading_state=heading_state, prev_line=prev_line
+                new_ctx,
+                line,
+                heading_state=heading_state,
+                line_state=line_state,
             )
-            prev_line = line
+            line_state.prev_line = line
+            line_state.at_doc_start = False
+            line_state.after_page_break = False
+            line_state.prev_was_article_heading = (
+                hard
+                and new_ctx.article != art_before
+                and new_ctx.point is None
+            )
             new_key = new_ctx.boundary_key()
             if hard or (cur_parts and new_key != cur_key):
                 flush()
@@ -601,16 +643,28 @@ def build_page_context_map(text: str, ctx: StructureContext) -> dict[int, dict[s
     cur = ctx.copy()
     page: int | None = None
     hs = ArticleHeadingState(lowercase_headings=detect_lowercase_heading_style(text))
-    prev = ""
+    ls = StructureLineState(heading=hs)
     for para in text.split("\n\n"):
         marks = PAGE_MARK.findall(para)
         if marks:
             page = int(marks[-1])
             cur.page = page
+            ls.after_page_break = True
         body = PAGE_MARK.sub("", para).strip()
-        for line in _expand_structure_lines(body, heading_state=hs, doc_kind=cur.doc_kind):
-            _update_ctx_from_paragraph(cur, line, heading_state=hs, prev_line=prev)
-            prev = line
+        for line in _expand_structure_lines(
+            body, heading_state=hs, doc_kind=cur.doc_kind, line_state=ls
+        ):
+            update_toc_state(ls, line)
+            art_before = cur.article
+            hard = _update_ctx_from_paragraph(
+                cur, line, heading_state=hs, line_state=ls
+            )
+            ls.prev_line = line
+            ls.at_doc_start = False
+            ls.after_page_break = False
+            ls.prev_was_article_heading = (
+                hard and cur.article != art_before and cur.point is None
+            )
             if page is not None:
                 out[page] = cur.metadata()
     return out
