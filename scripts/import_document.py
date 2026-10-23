@@ -100,8 +100,12 @@ def _normalize_is_numbered_heading(s: str, prev_line: str = "") -> bool:
         return False
     if re.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}\b", s):
         return False
+    from structure_headings import is_structure_heading_line
+
     ls = StructureLineState(
-        prev_line=prev_line, at_doc_start=not prev_line.strip()
+        prev_line=prev_line,
+        at_doc_start=not prev_line.strip(),
+        prev_was_structure_heading=is_structure_heading_line(prev_line),
     )
     if accept_code_point_line(s, ls)[0]:
         return True
@@ -135,13 +139,14 @@ def normalize_text(md: str) -> str:
             out.append(s)
             prev_raw = s
             continue
-        prev_for_point = prev_raw if buffer else prev_raw
+        prev_for_point = " ".join(buffer) if buffer else prev_raw
+        prev_heading_tail = buffer[-1] if buffer else prev_raw
         is_new_block = (
             s.startswith('<!--') or s.startswith('#') or s.startswith('- ') or
             s.startswith('* ') or s.startswith('|') or
             re.match(r'^(?:Статья|СТАТЬЯ)\s+\d', s) or
             re.match(r'^(?:Глава|ГЛАВА|Раздел|РАЗДЕЛ|Часть)\s', s, re.IGNORECASE) or
-            _normalize_is_numbered_heading(s, " ".join(buffer) if buffer else prev_for_point) or
+            _normalize_is_numbered_heading(s, prev_heading_tail) or
             s.startswith(('Приложение', 'ГОСТ', 'Таблица', 'Примечание', 'ПРИЛОЖЕНИЕ'))
         )
         if is_new_block and buffer:

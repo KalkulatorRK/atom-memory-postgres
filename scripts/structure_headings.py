@@ -19,10 +19,14 @@ RE_ARTICLE_LOW_HEADING = re.compile(
     r"^статья\s+(\d+(?:\.\d+)*)\.\s+[A-ZА-ЯЁ«\"(]"
 )
 RE_INLINE_ARTICLE = re.compile(r"(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)*)")
+RE_CHAPTER_HEADING = re.compile(
+    r"^(?:Глава|ГЛАВА|Раздел|РАЗДЕЛ|Часть|ЧАСТЬ)\s+\S", re.IGNORECASE
+)
 
 RE_ABBREV_BEFORE_DOT = re.compile(
-    r"(?i)\b(?:п|пп|ст|ч|разд|подп|абз|§|\d+)\.\s*$"
+    r"(?i)\b(?:п|пп|ст|ч|разд|подп|абз|§)\.\s*$"
 )
+RE_DATE_END = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2,4}\.\s*$")
 
 RE_TOC_TRAIL = re.compile(r"(?:\.{2,}|…)\s*\d+\s*$")
 RE_POINT_LINE = re.compile(r"^(\d+(?:\.\d+)*)\.\s+(\S.*)$")
@@ -46,6 +50,7 @@ class ArticleHeadingState:
     lowercase_headings: bool = False
     after_toc_restart: bool = False
     in_toc_run: bool = False
+    consecutive_heading_lines: int = 0
 
 
 @dataclass
@@ -56,7 +61,7 @@ class StructureLineState:
     at_doc_start: bool = True
     after_page_break: bool = False
     heading: ArticleHeadingState = field(default_factory=ArticleHeadingState)
-    prev_was_article_heading: bool = False
+    prev_was_structure_heading: bool = False
 
 
 def detect_lowercase_heading_style(text: str) -> bool:
@@ -84,6 +89,22 @@ def is_capital_article_heading(s: str) -> bool:
     )
 
 
+def is_article_heading_line(s: str) -> bool:
+    s = s.strip()
+    return bool(
+        RE_ARTICLE_HEADING_STRICT.match(s)
+        or RE_ARTICLE_BARE.match(s)
+    )
+
+
+def is_structure_heading_line(s: str) -> bool:
+    s = s.strip()
+    return bool(
+        is_article_heading_line(s)
+        or RE_CHAPTER_HEADING.match(s)
+    )
+
+
 def is_real_sentence_end_before(text: str) -> bool:
     """Конец предложения/абзаца перед кандидатом в заголовок (не «п. 3.»)."""
     before = text.rstrip()
@@ -91,8 +112,11 @@ def is_real_sentence_end_before(text: str) -> bool:
         return False
     if before[-1] not in ".:;!?":
         return False
-    if before[-1] == "." and RE_ABBREV_BEFORE_DOT.search(before):
-        return False
+    if before[-1] == ".":
+        if RE_DATE_END.search(before):
+            return True
+        if RE_ABBREV_BEFORE_DOT.search(before):
+            return False
     return True
 
 
@@ -106,7 +130,7 @@ def boundary_before_structure(prev_line: str, *, line_state: StructureLineState)
         return True
     if not prev_line.strip():
         return False
-    if line_state.prev_was_article_heading:
+    if line_state.prev_was_structure_heading:
         return True
     return is_real_sentence_end_before(prev_line)
 
@@ -117,7 +141,7 @@ def is_toc_heading_line(s: str) -> bool:
         return False
     if RE_TOC_TRAIL.search(s):
         return True
-    if RE_ARTICLE_HEADING_STRICT.match(s) or RE_ARTICLE_BARE.match(s):
+    if is_article_heading_line(s):
         if re.search(r"\.{3,}|…", s):
             return True
         if re.search(r"\s\d+\s*$", s) and not re.search(r"\.\s+[A-ZА-ЯЁ]", s):
@@ -131,7 +155,7 @@ def is_substantive_body_line(s: str) -> bool:
         return False
     if is_toc_heading_line(s):
         return False
-    if RE_ARTICLE_HEADING_STRICT.match(s) or RE_ARTICLE_BARE.match(s):
+    if is_article_heading_line(s):
         return False
     if RE_POINT_LINE.match(s) and len(s) > 20:
         return True
@@ -142,17 +166,35 @@ def is_substantive_body_line(s: str) -> bool:
     return len(s) > 30
 
 
+def _heading_article_num(s: str) -> tuple[int, ...] | None:
+    m = RE_ARTICLE_HEADING_STRICT.match(s.strip()) or RE_ARTICLE_BARE.match(s.strip())
+    if not m:
+        return None
+    return article_number_tuple(m.group(1))
+
+
 def update_toc_state(line_state: StructureLineState, line: str) -> None:
+    """TOC = 2+ подряд заголовков статей; тело — рестарт N ≤ last (P2)."""
     s = line.strip()
-    if is_toc_heading_line(s):
-        line_state.heading.in_toc_run = True
+    hs = line_state.heading
+    if is_article_heading_line(s):
+        num = _heading_article_num(s)
+        if hs.in_toc_run and num and hs.last_article and num < hs.last_article:
+            hs.after_toc_restart = True
+            hs.in_toc_run = False
+            hs.consecutive_heading_lines = 0
+        elif not hs.in_toc_run:
+            hs.consecutive_heading_lines += 1
+            if hs.consecutive_heading_lines >= 2:
+                hs.in_toc_run = True
         return
-    if not line_state.heading.in_toc_run:
+    if is_substantive_body_line(s):
+        if hs.in_toc_run:
+            hs.after_toc_restart = True
+            hs.in_toc_run = False
+        hs.consecutive_heading_lines = 0
         return
-    real_article = (RE_ARTICLE_HEADING_STRICT.match(s) or RE_ARTICLE_BARE.match(s)) and not is_toc_heading_line(s)
-    if is_substantive_body_line(s) or real_article:
-        line_state.heading.in_toc_run = False
-        line_state.heading.after_toc_restart = True
+    hs.consecutive_heading_lines = 0
 
 
 def _accept_monotonic(
@@ -224,10 +266,18 @@ def accept_article_heading(
     return num_s, title
 
 
-def point_body_starts_ok(rest: str) -> bool:
+def point_body_starts_ok(rest: str, prev_line: str) -> bool:
     if not rest:
         return False
-    return bool(re.match(r"^[A-ZА-ЯЁ«\"(0-9]", rest))
+    if re.match(r"^[A-ZА-ЯЁ«\"(0-9]", rest):
+        return True
+    pl = prev_line.rstrip()
+    if rest[0].islower():
+        if pl.endswith(":") or pl.endswith(";"):
+            return True
+        if RE_POINT_LINE.match(pl) or RE_SUBPOINT_LINE.match(pl):
+            return True
+    return False
 
 
 def accept_code_point_line(
@@ -244,16 +294,17 @@ def accept_code_point_line(
     if not m:
         return None, None
     pid, rest = m.group(1), m.group(2)
-    if not point_body_starts_ok(rest):
+    prev = line_state.prev_line
+    if not point_body_starts_ok(rest, prev):
         return None, None
-    prev = line_state.prev_line.rstrip()
-    if line_state.prev_was_article_heading:
+    prev_r = prev.rstrip()
+    if line_state.prev_was_structure_heading:
         return pid, kind
-    if boundary_before_structure(line_state.prev_line, line_state=line_state):
+    if boundary_before_structure(prev, line_state=line_state):
         return pid, kind
-    if prev and RE_REF_WORD_BEFORE_POINT.search(prev):
+    if prev_r and RE_REF_WORD_BEFORE_POINT.search(prev_r):
         return None, None
-    if prev and RE_LOWERCASE_WORD_TAIL.search(prev) and prev[-1] not in ".:;!?":
+    if prev_r and RE_LOWERCASE_WORD_TAIL.search(prev_r) and prev_r[-1] not in ".:;!?":
         return None, None
     return None, None
 

@@ -176,6 +176,14 @@ def main():
             "UPDATE projects SET embed_policy=%s WHERE name=%s",
             (args.set_policy[1], args.set_policy[0]),
         )
+        if cur.rowcount == 0:
+            conn.rollback()
+            conn.close()
+            print(
+                f"Ошибка: проект {args.set_policy[0]!r} не найден",
+                file=sys.stderr,
+            )
+            return 1
         conn.commit()
         conn.close()
         print(f"embed_policy={args.set_policy[1]} для {args.set_policy[0]}")

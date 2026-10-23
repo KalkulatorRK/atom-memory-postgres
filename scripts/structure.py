@@ -15,6 +15,7 @@ from structure_headings import (
     accept_code_point_line,
     detect_lowercase_heading_style,
     is_capital_article_heading,
+    is_structure_heading_line,
     split_inline_article_segments,
     update_toc_state,
 )
@@ -61,7 +62,7 @@ RE_LAW = re.compile(
 )
 RE_STANDARD_TITLE = re.compile(
     r"(?<![а-яёa-z])("
-    r"(?:ГОСТ(?:\s*Р)?\s*[-\d][-\w]*"
+    r"(?:ГОСТ(?:\s*Р)?\s*[\d][\d.\w\-]*"
     r"|СДАНК[-\w]+"
     r"|(?-i:СТО)\s+(?:Газпром\s+[\d][-\d.]+|\d+[-\d.]+|[A-Za-zА-ЯЁ][\w\s-]*[\d][-\d.]*)"
     r"|ISO\s*[-\d][-\w]*)"
@@ -263,7 +264,7 @@ def detect_doc_kind(text: str, title: str, explicit: str) -> str | None:
 
 
 def _document_header_blob(text: str, source_title: str) -> str:
-    """Шапка: title + абзацы до первой статьи/тела кодекса."""
+    """Шапка: title + короткий преамбульный блок до первой структуры."""
     from structure_headings import RE_ARTICLE_BARE, RE_ARTICLE_HEADING_STRICT
 
     chunks = [source_title]
@@ -273,8 +274,12 @@ def _document_header_blob(text: str, source_title: str) -> str:
             break
         if re.match(r"^\d+\.\s+[A-ZА-ЯЁ]", first):
             break
+        if re.match(r"^\d+(?:\.\d+)+\s+[A-ZА-ЯЁ]", first):
+            break
+        if re.match(r"^\d+\s+[A-ZА-ЯЁ]", first) and not RE_FZ_LINE.match(first):
+            break
         chunks.append(para)
-        if len("\n\n".join(chunks)) > 5000:
+        if len(chunks) >= 3 or len("\n\n".join(chunks)) > 1200:
             break
     return "\n\n".join(chunks)
 
@@ -442,7 +447,7 @@ def _expand_structure_lines(
                 at_doc_start=ls.at_doc_start,
                 after_page_break=ls.after_page_break,
                 heading=peek,
-                prev_was_article_heading=ls.prev_was_article_heading,
+                prev_was_structure_heading=ls.prev_was_structure_heading,
             )
             num, _ = accept_article_heading(
                 line, peek, doc_kind=doc_kind, line_state=peek_ls
@@ -451,14 +456,14 @@ def _expand_structure_lines(
                 out.append(line)
                 ls.prev_line = line
                 ls.at_doc_start = False
-                ls.prev_was_article_heading = True
+                ls.prev_was_structure_heading = True
                 continue
         for seg in split_inline_article_segments(line):
             if seg:
                 out.append(seg)
                 ls.prev_line = seg
                 ls.at_doc_start = False
-                ls.prev_was_article_heading = is_capital_article_heading(seg)
+                ls.prev_was_structure_heading = is_structure_heading_line(seg)
     return out or ([para.strip()] if para.strip() else [])
 
 
@@ -583,11 +588,7 @@ def structure_split(
             line_state.prev_line = line
             line_state.at_doc_start = False
             line_state.after_page_break = False
-            line_state.prev_was_article_heading = (
-                hard
-                and new_ctx.article != art_before
-                and new_ctx.point is None
-            )
+            line_state.prev_was_structure_heading = is_structure_heading_line(line)
             new_key = new_ctx.boundary_key()
             if hard or (cur_parts and new_key != cur_key):
                 flush()
@@ -662,9 +663,7 @@ def build_page_context_map(text: str, ctx: StructureContext) -> dict[int, dict[s
             ls.prev_line = line
             ls.at_doc_start = False
             ls.after_page_break = False
-            ls.prev_was_article_heading = (
-                hard and cur.article != art_before and cur.point is None
-            )
+            ls.prev_was_structure_heading = is_structure_heading_line(line)
             if page is not None:
                 out[page] = cur.metadata()
     return out
