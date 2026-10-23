@@ -15,7 +15,7 @@ from embeddings import (
     min_similarity_for_space,
     resolve_provider,
 )
-from structure import format_citation, law_ilike_pattern, normalize_date, parse_date_strict
+from structure import format_citation, law_ilike_pattern, parse_date_strict
 
 SEARCH_LEG_K = int(os.environ.get("SEARCH_LEG_K", "50"))
 SEARCH_RRF_K = int(os.environ.get("SEARCH_RRF_K", "60"))

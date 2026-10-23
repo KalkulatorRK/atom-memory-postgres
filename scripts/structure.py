@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 PAGE_MARK = re.compile(r"<!-- страница (\d+) -->")

@@ -5,7 +5,7 @@ import psycopg2
 import pytest
 
 from embeddings import resolve_provider
-from search_core import _exact_match, extract_identifiers, search, search_fts_only
+from search_core import _exact_match, search, search_fts_only
 from vector_index import hnsw_index_name
 
 pytestmark = pytest.mark.db

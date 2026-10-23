@@ -12,7 +12,7 @@ import psycopg2
 
 from _common import fts_query, ili_terms, linked_by_atom
 from search_core import hit_to_dict, search
-from structure import format_citation, normalize_date
+from structure import format_citation
 
 
 def get_dsn_local():
