@@ -16,6 +16,7 @@ from structure_headings import (
     accept_code_point_line,
     detect_lowercase_heading_style,
     is_consultant_running_header_prefix,
+    is_paren_boundary_line,
     is_running_header_line,
     is_strict_code_chapter_heading,
     is_strict_code_paragraph_heading,
@@ -272,6 +273,17 @@ def detect_doc_kind(text: str, title: str, explicit: str) -> str | None:
     return None
 
 
+def _meta_source_text(text: str, source_title: str) -> str:
+    """Сырой текст первой страницы для извлечения law/redaction/effective_date."""
+    chunk = text
+    m = re.search(r"<!--\s*страница\s+2\s*-->", text)
+    if m:
+        chunk = text[: m.start()]
+    elif len(chunk) > 12000:
+        chunk = chunk[:12000]
+    return f"{source_title}\n\n{chunk}"
+
+
 def _document_header_blob(text: str, source_title: str) -> str:
     """Шапка: title + короткий преамбульный блок до первой структуры."""
     from structure_headings import RE_ARTICLE_BARE, RE_ARTICLE_HEADING_STRICT
@@ -370,6 +382,8 @@ def _update_ctx_from_paragraph(
     hard = False
     s = para.strip()
     if not s or s.startswith("<!--"):
+        return False
+    if is_paren_boundary_line(s) and ctx.article:
         return False
 
     if heading_state is not None and ctx.doc_kind == "code":
@@ -788,10 +802,12 @@ def _repeated_header_lines(text: str) -> set[str]:
         if n >= 3 or (n >= 2 and is_strict_code_volume_heading(ln))
     }
     repeated |= page_tops
+    from structure_headings import is_repeatable_colontitel_shape
+
     repeated |= {
         ln
         for ln, n in counts.items()
-        if n >= 2 and is_consultant_running_header_prefix(ln)
+        if n >= 2 and is_repeatable_colontitel_shape(ln)
     }
     return repeated
 
@@ -827,6 +843,7 @@ def structure_split(
     block_start_page: int | None = None
     cur_parts: list[str] = []
     cur_key = cur_ctx.boundary_key()
+    in_title_block = True
 
     def flush():
         nonlocal cur_parts, block_start_page
@@ -869,9 +886,18 @@ def structure_split(
                 and n_rep == 2
                 and not same_chapter_colontitel
             )
+            if in_title_block and (
+                is_strict_code_volume_heading(line)
+                or is_structure_heading_line(line)
+                or RE_POINT.match(line)
+                or RE_SUBPOINT.match(line)
+            ):
+                in_title_block = False
             running = same_chapter_colontitel or is_running_header_line(
                 line,
                 repeated=line in repeated_headers and not body_chapter_dup,
+                skip_title_block=in_title_block,
+                page_top_after_break=line_state.after_page_break,
             )
             if line_state.preserve_page_break:
                 line_state.after_page_break = True
@@ -1007,13 +1033,17 @@ def build_page_context_map(text: str, ctx: StructureContext) -> dict[int, dict[s
 
 
 def prepare_for_import(
-    md: str, options: DocImportOptions
+    md: str,
+    options: DocImportOptions,
+    *,
+    meta_source: str | None = None,
 ) -> tuple[str, StructureContext | None, dict[int, dict[str, Any]]]:
     cleaned = strip_colontituls(md)
     kind = detect_doc_kind(cleaned, options.source_title, options.doc_kind)
     if not kind:
         return md, None, {}
-    red, eff, law, standard, meta_warn = extract_document_meta(cleaned, options)
+    meta_blob = _meta_source_text(meta_source or md, options.source_title)
+    red, eff, law, standard, meta_warn = extract_document_meta(meta_blob, options)
     ctx = StructureContext(
         doc_kind=kind, law=law, standard=standard, redaction=red, effective_date=eff
     )

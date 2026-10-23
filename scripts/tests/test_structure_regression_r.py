@@ -10,7 +10,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from import_document import normalize_text, pdf_to_text, quality_gate  # noqa: E402
 from search_core import _exact_match, parse_structured_query  # noqa: E402
-from structure import DocImportOptions, detect_doc_kind, extract_document_meta, prepare_for_import, structure_split  # noqa: E402
+from structure import (  # noqa: E402
+    DocImportOptions,
+    _meta_source_text,
+    detect_doc_kind,
+    extract_document_meta,
+    prepare_for_import,
+    structure_split,
+)
 from tests.test_structure_e2e import _make_code_pdf  # noqa: E402
 
 
@@ -144,6 +151,39 @@ class RegressionR6Dates(unittest.TestCase):
         red, eff, *_ = extract_document_meta(text, DocImportOptions(source_title="d.pdf"))
         self.assertEqual(eff, "2024-03-01")
         self.assertIn("ред.", red or "")
+
+    def test_wrapped_consultant_title_effective_date(self):
+        raw = (
+            "Гражданский кодекс Российской Федерации (часть первая)\n"
+            "от 26.01.1996 N 14-ФЗ (ред. от\n"
+            "01.03.2024)\n\n"
+            "Статья 1. Общие положения\n"
+            "1. Текст первой статьи достаточной длины для quality gate filter."
+        )
+        blob = _meta_source_text(raw, "gk2024.pdf")
+        red, eff, law, *_ = extract_document_meta(
+            blob, DocImportOptions(source_title="gk2024.pdf")
+        )
+        self.assertEqual(eff, "2024-03-01")
+        self.assertIn("ред.", red or "")
+        self.assertIn("14", law or "")
+
+    def test_wrapped_title_after_normalize_keeps_effective_date(self):
+        raw = (
+            "Гражданский кодекс Российской Федерации (часть первая)\n"
+            "от 26.01.1996 N 14-ФЗ (ред. от\n"
+            "01.03.2024)\n\n"
+            "Статья 1. Общие положения\n"
+            "1. Текст первой статьи достаточной длины для quality gate filter."
+        )
+        md = normalize_text(raw)
+        _, ctx, _ = prepare_for_import(
+            md,
+            DocImportOptions(doc_kind="code", source_title="gk2024.pdf"),
+            meta_source=raw,
+        )
+        self.assertIsNotNone(ctx)
+        self.assertEqual(ctx.effective_date, "2024-03-01")
 
 
 if __name__ == "__main__":

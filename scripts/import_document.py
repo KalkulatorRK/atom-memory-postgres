@@ -129,6 +129,7 @@ def normalize_text(md: str) -> str:
     buffer = []
     prev_raw = ""
     merge_after_banner = False
+    in_title_block = True
     for line in lines:
         s = line.strip()
         if not s:
@@ -149,7 +150,13 @@ def normalize_text(md: str) -> str:
             is_running_header_line,
         )
 
-        if is_running_header_line(s):
+        if in_title_block and (
+            re.match(r"^(?:Статья|СТАТЬЯ)\s+\d", s)
+            or is_code_structure_boundary_line(s)
+            or _normalize_is_numbered_heading(s, "", prev_was_structure_heading=False)
+        ):
+            in_title_block = False
+        if is_running_header_line(s, skip_title_block=in_title_block):
             if buffer:
                 out.append(' '.join(buffer))
                 buffer = []
@@ -161,7 +168,9 @@ def normalize_text(md: str) -> str:
 
             pre_idx = len(out) - 2
             while pre_idx >= 0 and (
-                is_running_header_line(out[pre_idx])
+                is_running_header_line(
+                    out[pre_idx], skip_title_block=False
+                )
                 or out[pre_idx].startswith('<!--')
             ):
                 pre_idx -= 1
@@ -581,8 +590,8 @@ def import_doc(
         print("      Без изменений (sha совпал), импорт пропущен")
         return 0, 0
     print("[1/4] Конвертация PDF → текст...")
-    md = pdf_to_text(pdf_path)
-    md = normalize_text(md)
+    raw_md = pdf_to_text(pdf_path)
+    md = normalize_text(raw_md)
     doc_title = os.path.basename(pdf_path)
     imp_opts = DocImportOptions(
         doc_kind=doc_kind,
@@ -590,7 +599,7 @@ def import_doc(
         effective_date=effective_date,
         source_title=doc_title,
     )
-    md, struct_ctx, page_map = prepare_for_import(md, imp_opts)
+    md, struct_ctx, page_map = prepare_for_import(md, imp_opts, meta_source=raw_md)
     print(f"      Текст: {len(md)} символов, {time.time()-t0:.0f} сек")
     if struct_ctx:
         print(f"      Структурный профиль: {struct_ctx.doc_kind}")

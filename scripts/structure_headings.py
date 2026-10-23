@@ -272,14 +272,19 @@ def is_code_structure_boundary_line(s: str) -> bool:
     return is_strict_code_volume_heading(s)
 
 
-RE_FZ_RUNNING_HEADER = re.compile(
-    r"(?i)^(?:"
-    r"Федеральный\s+закон\s+от\s+\d{2}\.\d{2}\.\d{4}\s+N\s+\d+(?:\.\d+)?-ФЗ"
-    r"|(?:Постановлени[ея]|Указ)\s+"
-    r"|(?:ГОСТ(?:\s*Р)?|ISO)\s+[\d][\d.\w\-]*"
-    r"|\"?(?:Конституция|Гражданский\s+кодекс|Налоговый\s+кодекс)"
-    r")"
+RE_FZ_LAW_COLONTITEL = re.compile(
+    r"(?i)^Федеральный\s+закон\s+от\s+\d{2}\.\d{2}\.\d{4}\s+N\s+\d+(?:\.\d+)?-ФЗ"
 )
+RE_DATED_NORM_ACT_COLONTITEL = re.compile(
+    r"(?i)^(?:Постановлени[ея]|Указ)\s+.+\s+от\s+\d{2}\.\d{2}\.\d{4}\s+N\s+"
+)
+RE_GOST_ISO_COLONTITEL = re.compile(
+    r"(?i)^(?:ГОСТ(?:\s*Р)?|ISO)\s+[\d][\d.\w\-]*\s+\S"
+)
+RE_TITLE_DATE_WRAP_TAIL = re.compile(
+    r"^\d{1,2}\.\d{1,2}\.\d{2,4}\)\s*$"
+)
+RE_RED_OT_INLINE = re.compile(r"(?i)\(\s*ред\.\s+от")
 
 
 def is_consultant_header_wrap_fragment(s: str) -> bool:
@@ -287,7 +292,11 @@ def is_consultant_header_wrap_fragment(s: str) -> bool:
     s = s.strip()
     if not s or len(s) > 200 or RE_POINT_LINE.match(s):
         return False
-    if re.match(r"^[«\"(]", s) and re.search(r"(?i)федеральн", s):
+    if is_paren_boundary_line(s):
+        return False
+    if RE_TITLE_DATE_WRAP_TAIL.match(s):
+        return True
+    if re.match(r'^[«"]', s) and re.search(r"(?i)федеральн", s):
         return True
     if (
         re.match(r"^[а-яё]", s)
@@ -298,32 +307,93 @@ def is_consultant_header_wrap_fragment(s: str) -> bool:
     return False
 
 
-def is_consultant_running_header_prefix(s: str) -> bool:
-    """Колонтитул КонсультантПлюс / повторяющаяся шапка страницы (не тело статьи)."""
+def is_codex_colontitel_with_chapter(s: str) -> bool:
     s = s.strip()
-    if not s or len(s) > 240:
+    return bool(
+        re.search(r"(?i)кодекс", s)
+        and re.match(
+            r'(?i)^(?:\"[^\"]+\"\s+|[^\n]{0,100}?(?:кодекс\b))[^\n]{0,40}\bглава\s+\d+\.',
+            s,
+        )
+    )
+
+
+def is_consultant_whole_line_banner(s: str) -> bool:
+    """Строка целиком — служебный баннер КонсультантПлюс (не подстрока в теле)."""
+    s = s.strip()
+    if not s or len(s) > BANNER_MAX_LEN:
+        return False
+    if not re.search(r"(?i)консультант\s*плюс", s):
+        return False
+    return bool(
+        RE_CONSULTANT_BANNER_START.match(s)
+        or RE_CONSULTANT_DATE_START.match(s)
+        or RE_CONSULTANT_SUPPORT_START.match(s)
+        or RE_CONSULTANT_URL_START.match(s)
+        or re.match(r"(?i)^документ\s+предоставлен\s+консультант\s*плюс", s)
+    )
+
+
+def is_repeatable_colontitel_shape(s: str) -> bool:
+    """Форма колонтитула, допустимая только при повторе / верху страницы после разрыва."""
+    s = s.strip()
+    if not s:
         return False
     if is_consultant_header_wrap_fragment(s):
         return True
-    if len(s) < 8:
-        return False
-    if re.search(r"(?i)кодекс", s) and re.match(
-        r'(?i)^(?:\"[^\"]+\"\s+|[^\n]{0,100}?(?:кодекс\b))[^\n]{0,40}\bглава\s+\d+\.',
-        s,
-    ):
+    if RE_FZ_LAW_COLONTITEL.match(s):
         return True
-    if RE_FZ_RUNNING_HEADER.match(s):
+    if RE_DATED_NORM_ACT_COLONTITEL.match(s):
         return True
-    if re.search(r"(?i)консультант\s*плюс", s):
+    if RE_GOST_ISO_COLONTITEL.match(s):
+        return True
+    if is_codex_colontitel_with_chapter(s):
+        return True
+    if is_strict_code_volume_heading(s):
         return True
     return False
 
 
-def is_running_header_line(s: str, *, repeated: bool = False) -> bool:
+def is_consultant_running_header_prefix(s: str) -> bool:
+    """Префикс перед «N.» после разрыва (не титул первой страницы)."""
+    return is_repeatable_colontitel_shape(s)
+
+
+def is_document_title_line(s: str) -> bool:
+    """Титул/шапка первой страницы — не колонтитул для среза."""
+    s = s.strip()
+    if not s or is_paren_boundary_line(s):
+        return False
+    if RE_RED_OT_INLINE.search(s) or re.search(
+        r"(?i)\bN\s+\d+(?:\.\d+)?-ФЗ\b", s
+    ):
+        return True
+    if re.search(r"(?i)кодекс", s) and re.search(
+        r"(?i)(?:от\s+\d{2}\.\d{2}\.\d{4}|\(ред\.\s+от)", s
+    ):
+        return True
+    if RE_TITLE_DATE_WRAP_TAIL.match(s):
+        return True
+    return False
+
+
+def is_running_header_line(
+    s: str,
+    *,
+    repeated: bool = False,
+    skip_title_block: bool = False,
+    page_top_after_break: bool = False,
+) -> bool:
     s = s.strip()
     if not s or s.startswith("<!--"):
         return False
-    if is_consultant_running_header_prefix(s):
+    if skip_title_block and is_document_title_line(s):
+        return False
+    if is_consultant_whole_line_banner(s):
+        return True
+    if page_top_after_break and is_repeatable_colontitel_shape(s):
+        return True
+    if repeated and is_repeatable_colontitel_shape(s):
         return True
     if len(s) > BANNER_MAX_LEN:
         return False
