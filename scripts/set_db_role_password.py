@@ -8,12 +8,13 @@ import sys
 import psycopg2
 from psycopg2 import sql
 
+from db_dsn import admin_dsn_for_database
+
 
 def _admin_dsn(dbname: str = "postgres") -> str:
     admin = os.environ.get("ADMIN_DSN", "").strip()
     if admin:
-        base = admin.rsplit("/", 1)[0]
-        return f"{base}/{dbname}"
+        return admin_dsn_for_database(admin, dbname)
     return f"postgresql:///{dbname}"
 
 

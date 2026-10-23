@@ -39,8 +39,8 @@ if ! [[ "$DIMS" =~ ^[0-9]+$ ]]; then
   echo "dims должен быть целым числом"
   exit 1
 fi
-if [ "$DIMS" -gt 2000 ] 2>/dev/null; then
-  echo "dims > 2000: нужен halfvec (pgvector ≥ 0.7)"
+if [ "$DIMS" -lt 1 ] 2>/dev/null || [ "$DIMS" -gt 2000 ] 2>/dev/null; then
+  echo "dims: целое от 1 до 2000"
   exit 1
 fi
 if ! [[ "$M" =~ ^[0-9]+$ ]] || [ "$M" -lt 2 ] || [ "$M" -gt 100 ]; then
@@ -51,14 +51,12 @@ if ! [[ "$EFC" =~ ^[0-9]+$ ]] || [ "$EFC" -lt 4 ] || [ "$EFC" -gt 1000 ]; then
   echo "--ef-construction: целое от 4 до 1000"
   exit 1
 fi
-if ! [[ "$MEM" =~ ^[0-9]+[kKmMgG]?[bB]?$ ]]; then
-  echo "--mem: например 512MB, 1GB, 2048MB"
-  exit 1
-fi
 if ! [[ "$MPW" =~ ^[0-9]+$ ]]; then
   echo "max_parallel_maintenance_workers: целое"
   exit 1
 fi
+
+MEM="$(python3 "$SCRIPT_DIR/vector_index_validate.py" "$MEM")" || exit 1
 
 IDX=$(MODEL="$MODEL" DIMS="$DIMS" SCRIPT_DIR="$SCRIPT_DIR" python3 -c "
 import os, sys
@@ -68,9 +66,13 @@ print(hnsw_index_name(os.environ['MODEL'], int(os.environ['DIMS'])))
 ")
 
 if [ -n "${ADMIN_DSN:-}" ]; then
-  BASE="${ADMIN_DSN%/*}"
-  PSQL=(psql)
-  psql_admin() { psql "${BASE}/$1" "${@:2}"; }
+  psql_admin() {
+    local db="$1"
+    shift
+    local url
+    url="$(DB_NAME="$db" ADMIN_DSN="$ADMIN_DSN" python3 "$SCRIPT_DIR/db_dsn.py" admin-url)"
+    psql "$url" "$@"
+  }
 elif [ "$(id -un)" = "postgres" ]; then
   psql_admin() { psql -d "$1" "${@:2}"; }
 else
@@ -83,7 +85,6 @@ if [ "$DROP" -eq 1 ]; then
   psql_admin "$DB" -v ON_ERROR_STOP=1 -c "DROP INDEX IF EXISTS public.\"$IDX\";"
 fi
 
-# Один сеанс psql: SET действует на CREATE INDEX CONCURRENTLY ниже (MEM/MPW проверены выше).
 psql_admin "$DB" -v ON_ERROR_STOP=1 \
   -v model="$MODEL" -v dims="$DIMS" -v m="$M" -v efc="$EFC" -v idx="$IDX" <<SQL
 SET maintenance_work_mem = '${MEM}';

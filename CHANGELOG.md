@@ -2,6 +2,10 @@
 
 ## 1.9.1
 
+- **Fix:** `setup_memory_db.sh` без `ADMIN_DSN` снова создаёт роль через `admin_psql` + `render_role_password_sql.py` (stdlib), без psycopg2 от root.
+- `db_dsn.py`: DSN с query-string (`?sslmode=`) для admin/migration/vector_index.
+- `vector_index_admin.sh`: строгая проверка `--mem`/`--dims`; DROP только после валидации.
+- Зависимость `mcp>=1,<2`; migration-тесты в CI не skip при ошибке ADMIN_DSN; CI job setup без ADMIN_DSN.
 - MCP JSON-RPC `memory_search`: **всегда JSON-массив** по умолчанию; warnings в stderr или opt-in `include_warnings` / `ATOM_MEMORY_MCP_INCLUDE_WARNINGS=1`.
 - `vector_index_admin.sh`: SET и CREATE INDEX в одном сеансе psql; валидация `--m`, `--ef-construction`, `--mem`.
 - Откат `0004_vector_search_down.sql` идемпотентен; снимок `content_hash`/`embed_meta` — без лишнего re-embed после повторного 0004.

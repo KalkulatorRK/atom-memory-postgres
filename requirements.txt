@@ -1,5 +1,6 @@
 # Зависимости скриптов атомной памяти.
-# MCP-сервер (scripts/memory_mcp_server.py) дополнительно требует пакет mcp.
+# MCP-сервер (scripts/memory_mcp_server.py): FastMCP из mcp 1.x (2.x ломает import).
+mcp>=1.0,<2
 pymupdf>=1.24
 psycopg2-binary>=2.9
 requests>=2.31

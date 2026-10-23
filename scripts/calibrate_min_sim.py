@@ -48,11 +48,18 @@ def main() -> int:
 
     pos_min = min(pos_sims)
     neg_max = max(neg_sims)
-    suggested = max(0.35, min(0.72, (pos_min + neg_max) / 2))
+    raw_mid = (pos_min + neg_max) / 2
+    floor = 0.35
+    ceiling = 0.72
+    suggested = max(floor, min(ceiling, raw_mid))
     print("fake:hash-v1 — калибровка EMBED_MIN_SIM (ориентир, не замена eval на ваших данных)")
     print(f"  релевантные пары: min={pos_min:.3f}  sims={[round(x,3) for x in pos_sims]}")
     print(f"  нерелевантные:    max={neg_max:.3f}  sims={[round(x,3) for x in neg_sims]}")
-    print(f"  предложенный порог для fake: {suggested:.3f}")
+    print(f"  середина min/max: {raw_mid:.3f}; пол fake ≥ {floor} (дефолт embeddings.py)")
+    if suggested > raw_mid:
+        print(f"  предложенный порог для fake: {suggested:.3f} (поднят до пола {floor})")
+    else:
+        print(f"  предложенный порог для fake: {suggested:.3f}")
     print("  облако (text-embedding-3-small): дефолт 0.72 консервативен; задайте EMBED_MIN_SIM")
     print("  или JSON {\"cloud:text-embedding-3-small\": 0.65} после scripts/eval_search.py")
     return 0

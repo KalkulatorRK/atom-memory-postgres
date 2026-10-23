@@ -46,7 +46,8 @@ metadata:
 `-v ON_ERROR_STOP=1` вернёт 0 даже при ошибках. Поэтому всё делает скрипт:
 
 ```bash
-sudo bash scripts/setup_memory_db.sh memory hermes 'ваш_пароль'
+export MEMORY_DB_PASSWORD='ваш_пароль'
+sudo -E bash scripts/setup_memory_db.sh memory hermes
 ```
 
 Он ставит PostgreSQL и pgvector, создаёт БД и роль, применяет схему от

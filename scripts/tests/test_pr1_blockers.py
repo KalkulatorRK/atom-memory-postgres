@@ -154,7 +154,8 @@ def test_setup_password_sql_injection_safe():
     script = os.path.join(root, "setup_memory_db.sh")
     text = open(script, encoding="utf-8").read()
     assert "PASSWORD '${DB_PASS}'" not in text
-    assert "set_db_role_password.py" in text
+    assert "render_role_password_sql.py" in text
+    assert "set_db_role_password()" in text
     assert "-v db_pass=" not in text
 
 

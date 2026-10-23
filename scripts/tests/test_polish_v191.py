@@ -42,6 +42,7 @@ def test_calibrate_min_sim_runs_offline():
         check=True,
     )
     assert "EMBED_MIN_SIM" in r.stdout
+    assert "пол fake" in r.stdout or "пол" in r.stdout
 
 
 def test_setup_skips_schema_when_atoms_exist():
@@ -51,6 +52,16 @@ def test_setup_skips_schema_when_atoms_exist():
     ).read()
     assert "to_regclass('public.atoms')" in text
     assert "пропуск schema.sql" in text
+
+
+def test_setup_role_password_via_admin_psql():
+    text = open(
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "setup_memory_db.sh"),
+        encoding="utf-8",
+    ).read()
+    assert "set_db_role_password()" in text
+    assert "admin_psql postgres" in text
+    assert 'python3 "$SCRIPT_DIR/set_db_role_password.py"' not in text
 
 
 def test_memory_query_fts_json():

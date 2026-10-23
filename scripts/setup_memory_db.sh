@@ -25,18 +25,28 @@ if ! [[ "$DB_NAME" =~ $ident && "$DB_USER" =~ $ident ]]; then
     exit 1
 fi
 
-# DSN суперпользователя для конкретной базы (в CI — TCP, без unix-socket).
+# DSN суперпользователя для конкретной базы (CI: ADMIN_DSN; иначе peer через postgres OS user).
 admin_psql() {
     local db="${1:-postgres}"
     shift
     if [ -n "${ADMIN_DSN:-}" ]; then
-        local base="${ADMIN_DSN%/*}"
-        psql "${base}/${db}" "$@"
+        local url
+        url="$(DB_NAME="$db" ADMIN_DSN="$ADMIN_DSN" python3 "$SCRIPT_DIR/db_dsn.py" admin-url)"
+        psql "$url" "$@"
     elif [ "$(id -un)" = "postgres" ]; then
         psql -d "$db" "$@"
     else
         sudo -u postgres psql -d "$db" "$@"
     fi
+}
+
+set_db_role_password() {
+    local tmp
+    tmp="$(mktemp)"
+    chmod 600 "$tmp"
+    DB_USER="$DB_USER" MEMORY_DB_PASSWORD="$DB_PASS" python3 "$SCRIPT_DIR/render_role_password_sql.py" > "$tmp"
+    admin_psql postgres -v ON_ERROR_STOP=1 -f "$tmp"
+    rm -f "$tmp"
 }
 
 if [ -n "${SETUP_SKIP_INSTALL:-}" ]; then
@@ -79,7 +89,7 @@ echo "[3/4] Создание БД $DB_NAME и пользователя $DB_USER.
 if ! admin_psql postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
   admin_psql postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${DB_NAME}\""
 fi
-MEMORY_DB_PASSWORD="$DB_PASS" python3 "$SCRIPT_DIR/set_db_role_password.py" "$DB_USER"
+set_db_role_password
 admin_psql postgres -v ON_ERROR_STOP=1 \
   -v db_name="$DB_NAME" -v db_user="$DB_USER" <<'SQL'
 SELECT format('GRANT CONNECT, TEMPORARY ON DATABASE %I TO %I', :'db_name', :'db_user') \gexec
