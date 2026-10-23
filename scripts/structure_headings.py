@@ -69,6 +69,13 @@ RE_PAREN_BOUNDARY = re.compile(
     re.IGNORECASE,
 )
 RE_FZ_WRAP_LINE = re.compile(r"^\d+\s+Федерального\s+зак", re.IGNORECASE)
+RE_REPEALED_TAIL = re.compile(r"(?i)утратил")
+RE_ARTICLES_RANGE = re.compile(
+    r"(?i)статьи\s+(\d+(?:\.\d+)*)\s*[-–—]\s*(\d+(?:\.\d+)*)"
+)
+RE_ARTICLE_NUM_IN_LINE = re.compile(
+    r"(?i)(?:статьи|статья|СТАТЬЯ)\s+(\d+(?:\.\d+)*)"
+)
 
 
 @dataclass
@@ -111,6 +118,43 @@ def article_number_tuple(raw: str) -> tuple[int, ...] | None:
         return tuple(int(p) for p in raw.split("."))
     except ValueError:
         return None
+
+
+def repealed_range_anchor(s: str) -> tuple[int, ...] | None:
+    """Последний номер в строке «Статьи N–M … утратили силу» / перечне статей."""
+    s = s.strip()
+    if not s or not RE_REPEALED_TAIL.search(s):
+        return None
+    if is_repealed_article_heading(s):
+        return None
+    m = RE_ARTICLES_RANGE.search(s)
+    if m:
+        return article_number_tuple(m.group(2))
+    nums: list[tuple[int, ...]] = []
+    for m in RE_ARTICLE_NUM_IN_LINE.finditer(s):
+        t = article_number_tuple(m.group(1))
+        if t:
+            nums.append(t)
+    return max(nums) if nums else None
+
+
+def _successor_article(
+    base: tuple[int, ...], candidate: tuple[int, ...]
+) -> bool:
+    """Следующая статья: K+1, K.1 или K.n+1 на том же уровне."""
+    if candidate <= base:
+        return False
+    if len(base) == 1 and len(candidate) == 1 and candidate[0] == base[0] + 1:
+        return True
+    if len(candidate) == len(base) + 1 and candidate[:-1] == base and candidate[-1] == 1:
+        return True
+    if (
+        len(candidate) == len(base)
+        and candidate[:-1] == base[:-1]
+        and candidate[-1] == base[-1] + 1
+    ):
+        return True
+    return False
 
 
 def is_capital_article_heading(s: str) -> bool:
@@ -292,6 +336,9 @@ def update_toc_state(line_state: StructureLineState, line: str) -> None:
     """TOC = 2+ подряд заголовков без тела; тело — рестарт N ≤ last (P2/Q4)."""
     s = line.strip()
     hs = line_state.heading
+    anchor = repealed_range_anchor(s)
+    if anchor is not None:
+        hs.last_article = anchor
     if is_paren_boundary_line(s):
         return
     if RE_CHAPTER_HEADING.match(s) or RE_SUBSECTION_HEADING.match(s):
@@ -337,16 +384,21 @@ def _likely_false_forward_heading(
     last: tuple[int, ...],
     *,
     allow_large_forward: bool = False,
+    prev_line: str = "",
 ) -> bool:
+    """Только fwd_swallow: голая «Статья N» (+5) или цитата после «…содержания:»."""
     if allow_large_forward:
         return False
-    if not (RE_ARTICLE_BARE.match(s) or RE_ARTICLE_HEADING_STRICT.match(s)):
+    if len(num) != 1 or len(last) != 1 or num[0] - last[0] < 5:
         return False
-    if len(num) == 1 and len(last) == 1 and num[0] - last[0] >= 5:
+    if RE_ARTICLE_BARE.match(s):
         return True
-    if num > last and num[0] == last[0] and len(num) > 1 and len(last) > 1:
-        if num[-1] - last[-1] >= 5:
-            return True
+    pl = prev_line.strip().lower()
+    if (
+        RE_ARTICLE_HEADING_STRICT.match(s)
+        and ("содержания" in pl or pl.endswith(":"))
+    ):
+        return True
     return False
 
 
@@ -416,12 +468,24 @@ def accept_article_heading(
         and state.last_article is not None
         and num is not None
         and _likely_false_forward_heading(
-            s, num, state.last_article, allow_large_forward=state.allow_large_forward
+            s,
+            num,
+            state.last_article,
+            allow_large_forward=state.allow_large_forward,
+            prev_line=line_state.prev_line,
         )
     ):
         state.false_forward_anchor = state.last_article
         state.false_forward_spurious = num
         return None, None
+
+    if (
+        state.false_forward_anchor is not None
+        and num is not None
+        and _successor_article(state.false_forward_anchor, num)
+    ):
+        state.false_forward_spurious = None
+        state.false_forward_anchor = None
 
     if needs_boundary and not toc_style and not forward:
         if not boundary_before_structure(
@@ -449,6 +513,8 @@ def accept_article_heading(
         return None, None
 
     state.last_article = num
+    state.false_forward_spurious = None
+    state.false_forward_anchor = None
     if state.allow_large_forward:
         state.allow_large_forward = False
     if allow_restart:
