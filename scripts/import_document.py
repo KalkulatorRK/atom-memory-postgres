@@ -106,6 +106,7 @@ def normalize_text(md: str) -> str:
         is_new_block = (
             s.startswith('<!--') or s.startswith('#') or s.startswith('- ') or
             s.startswith('* ') or s.startswith('|') or
+            re.match(r'^(?:Статья|СТАТЬЯ|Глава|ГЛАВА|Раздел|РАЗДЕЛ|Часть)\s', s, re.IGNORECASE) or
             len(s) < 120 and (s[0].isdigit() or
                 s.startswith(('Приложение', 'ГОСТ', 'Таблица', 'Примечание', 'ПРИЛОЖЕНИЕ')))
         )
@@ -299,7 +300,13 @@ def quality_gate(atoms):
         content = a["content"].strip()
         # Мусор: без букв, слишком короткий
         letters = re.findall(r'[А-Яа-яA-Za-z]', content)
-        if len(content) < 30 or len(letters) < 10:
+        sm = a.get("structure_meta") or {}
+        structured = bool(
+            sm.get("article") or sm.get("section_path") or sm.get("point") or sm.get("annex")
+        )
+        min_len = 8 if structured else 30
+        min_letters = 4 if structured else 10
+        if len(content) < min_len or len(letters) < min_letters:
             dropped += 1
             continue
         marks = re.findall(r'<!-- страница (\d+) -->', content)
@@ -313,6 +320,7 @@ def quality_gate(atoms):
 
 STRUCTURE_META_KEYS = (
     "doc_kind",
+    "standard",
     "law",
     "chapter",
     "article",
@@ -481,7 +489,7 @@ def import_doc(
         raise SystemExit(
             f"Файл уже импортирован в проект '{existing['project']}'. "
             f"Один файл не может лежать в двух проектах (location уникален).")
-    if existing and existing["same"]:
+    if existing and existing["same"] and doc_kind == "auto":
         print("      Без изменений (sha совпал), импорт пропущен")
         return 0, 0
     print("[1/4] Конвертация PDF → текст...")
@@ -508,10 +516,21 @@ def import_doc(
         text_atoms = structure_split(
             md, struct_ctx, chunk_max=CHUNK_MAX, chunk_min=CHUNK_MIN
         )
+        if not text_atoms:
+            print(
+                "      ⚠ структурная нарезка не дала атомов — fallback на smart_split",
+                file=sys.stderr,
+            )
+            struct_ctx = None
+            text_atoms = smart_split(md)
     else:
         text_atoms = smart_split(md)
     text_atoms, dropped = quality_gate(text_atoms)
     print(f"      Текст-атомов: {len(text_atoms)} (отброшено мусора: {dropped})")
+    if not text_atoms and not tables and not images:
+        raise SystemExit(
+            "Импорт не создал ни одного атома: проверьте --doc-kind или содержимое PDF."
+        )
 
     # Собираем все атомы: таблицы и изображения ПЕРВЫМИ (не режутся)
     all_atoms = []
@@ -614,12 +633,27 @@ def import_doc(
     cur.execute("SELECT id, content_sha FROM sources WHERE location = %s", (pdf_path,))
     row = cur.fetchone()
     if row and row[1] == sha:
-        # Файл не изменился — новую версию не плодим, атомы не трогаем.
-        conn.rollback()
-        cur.close()
-        conn.close()
-        print("      Без изменений (sha совпал), импорт пропущен")
-        return 0, 0
+        source_id_tmp = row[0]
+        cur.execute(
+            "SELECT a.metadata->>'doc_kind' FROM atoms a "
+            "JOIN versions v ON v.id = a.version_id "
+            "WHERE v.source_id = %s AND a.status = 'active' "
+            "AND a.metadata ? 'doc_kind' ORDER BY v.version_no DESC, a.id LIMIT 1",
+            (source_id_tmp,),
+        )
+        last_kind = cur.fetchone()
+        last_kind = last_kind[0] if last_kind else None
+        want_kind = None if doc_kind == "none" else (struct_ctx.doc_kind if struct_ctx else None)
+        if doc_kind == "auto" or want_kind == last_kind:
+            conn.rollback()
+            cur.close()
+            conn.close()
+            print("      Без изменений (sha совпал), импорт пропущен")
+            return 0, 0
+        print(
+            f"      sha совпал, но --doc-kind изменился ({last_kind!r} → {want_kind!r}) — новая версия",
+            file=sys.stderr,
+        )
     if row:
         source_id = row[0]
         cur.execute("UPDATE sources SET content_sha = %s, content_size = %s WHERE id = %s",
@@ -720,6 +754,7 @@ def import_doc(
         "INSERT INTO journal (op_type, details) VALUES ('import', %s::jsonb)",
         (json.dumps({"source_id": source_id, "version_id": version_id,
                      "version_no": version_no, "atoms": len(enriched),
+                     "doc_kind": struct_ctx.doc_kind if struct_ctx else None,
                      "file": os.path.basename(pdf_path)}, ensure_ascii=False),))
     conn.commit()
     cur.close()

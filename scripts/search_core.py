@@ -15,7 +15,7 @@ from embeddings import (
     min_similarity_for_space,
     resolve_provider,
 )
-from structure import format_citation
+from structure import format_citation, law_ilike_pattern, normalize_date, parse_date_strict
 
 SEARCH_LEG_K = int(os.environ.get("SEARCH_LEG_K", "50"))
 SEARCH_RRF_K = int(os.environ.get("SEARCH_RRF_K", "60"))
@@ -53,6 +53,42 @@ class SearchResult:
     legs: dict[str, int]
 
 
+@dataclass
+class StructuredQuery:
+    standard: str | None = None
+    article: str | None = None
+    point: str | None = None
+    section: str | None = None
+
+
+def parse_structured_query(query: str) -> StructuredQuery:
+    sq = StructuredQuery()
+    working = query
+    m_std = re.search(
+        r"(?:ГОСТ(?:\s*Р)?|СДАНК|СТО|ISO)\s*[-\w.]+", working, re.IGNORECASE
+    )
+    if m_std:
+        sq.standard = m_std.group(0).strip()
+        working = working[: m_std.start()] + " " + working[m_std.end() :]
+    for m in re.finditer(
+        r"(?<![\wа-яё])(?:ст\.|стать[яиюе])\s*(\d+(?:\.\d+)*)",
+        working,
+        re.IGNORECASE,
+    ):
+        sq.article = m.group(1)
+    for m in re.finditer(r"(?:п|пп)\.\s*(\d+(?:\.\d+)*)", working, re.IGNORECASE):
+        val = m.group(1)
+        if "." in val:
+            sq.section = val
+        else:
+            sq.point = val
+    if not sq.section and not sq.article and not sq.point:
+        for m in re.finditer(r"\b(\d+(?:\.\d+){1,4})\b", working):
+            sq.section = m.group(1)
+            break
+    return sq
+
+
 def extract_identifiers(query: str) -> list[tuple[str, str]]:
     """(type, value) — тип для яруса точных совпадений."""
     out: list[tuple[str, str]] = []
@@ -81,43 +117,88 @@ def _meta_section_matches(meta: dict, section_id: str) -> bool:
     if not sp:
         return False
     if isinstance(sp, list):
-        return section_id in sp or (sp and sp[-1] == section_id)
+        if not sp:
+            return False
+        leaf = sp[-1]
+        if leaf == section_id:
+            return True
+        if "." in section_id:
+            return leaf == section_id
+        # «п. 2» только для кодексов (point), не для «5.2» / «7.3.2»
+        return False
     return str(sp) == section_id
 
 
-def _exact_match(content: str, meta: dict, ids: list[tuple[str, str]]) -> bool:
-    if not ids:
-        return False
-    text = content or ""
+def _exact_match_structured(meta: dict, sq: StructuredQuery) -> bool:
     meta = meta or {}
-    articles = [re.search(r"\d+(?:\.\d+)*", v) for t, v in ids if t == "article"]
-    articles = [m.group(0) for m in articles if m]
-    points = [re.search(r"\d+(?:\.\d+)*", v) for t, v in ids if t == "point"]
-    points = [m.group(0) for m in points if m]
-    if articles and meta.get("article") in articles:
-        if points:
-            if meta.get("point") in points:
-                return True
-        else:
-            return True
-    for typ, val in ids:
-        if typ == "article":
-            num = re.search(r"\d+(?:\.\d+)*", val)
-            if num and meta.get("article") == num.group(0):
-                return True
-        if typ == "point":
-            num = re.search(r"\d+(?:\.\d+)*", val)
-            if num and meta.get("point") == num.group(0):
-                return True
-        if typ == "section":
-            num = re.search(r"\d+(?:\.\d+)*", val)
-            if num and _meta_section_matches(meta, num.group(0)):
-                return True
-        # Границы слова в Python (не PostgreSQL \m/\M)
-        pat = r"(?<!\w)" + re.escape(val) + r"(?!\w)"
-        if re.search(pat, text, re.IGNORECASE | re.UNICODE):
-            return True
+    if sq.article and str(meta.get("article")) != sq.article:
+        return False
+    if sq.point and str(meta.get("point")) != sq.point:
+        return False
+    if sq.section and not _meta_section_matches(meta, sq.section):
+        return False
+    if sq.standard:
+        blob = " ".join(
+            str(meta.get(k) or "")
+            for k in ("standard", "law", "source_doc")
+        ).lower()
+        if sq.standard.lower() not in blob:
+            return False
+    return any((sq.standard, sq.article, sq.point, sq.section))
+
+
+def _exact_match(content: str, meta: dict, sq: StructuredQuery) -> bool:
+    if _exact_match_structured(meta, sq):
+        return True
+    if sq.article or sq.point or sq.section:
+        return False
+    if sq.standard:
+        text = (content or "").lower()
+        return sq.standard.lower() in text
     return False
+
+
+def leg_metadata_ids(
+    cur,
+    sq: StructuredQuery,
+    project: str | None,
+    leg_k: int,
+    include_superseded: bool,
+    meta_sql: str,
+    meta_params: list,
+) -> list[int]:
+    if not any((sq.standard, sq.article, sq.point, sq.section)):
+        return []
+    pf, pp = _project_filter(project)
+    status = "" if include_superseded else " AND a.status = 'active'"
+    conds: list[str] = []
+    params: list = []
+    if sq.article:
+        conds.append("a.metadata->>'article' = %s")
+        params.append(sq.article)
+    if sq.point:
+        conds.append("a.metadata->>'point' = %s")
+        params.append(sq.point)
+    if sq.section:
+        conds.append("a.metadata->'section_path'->>-1 = %s")
+        params.append(sq.section)
+    if sq.standard:
+        conds.append(
+            "(a.metadata->>'standard' ILIKE %s OR a.metadata->>'law' ILIKE %s OR s.title ILIKE %s)"
+        )
+        like = f"%{sq.standard.split()[0]}%"
+        params.extend([like, like, like])
+    if not conds:
+        return []
+    sql = f"""
+        SELECT a.id FROM atoms a
+        JOIN versions v ON a.version_id = v.id
+        JOIN sources s ON a.document_id = s.id
+        WHERE ({' AND '.join(conds)}){status}{pf}{meta_sql}
+        ORDER BY a.id LIMIT %s
+    """
+    cur.execute(sql, params + pp + list(meta_params) + [leg_k])
+    return [r[0] for r in cur.fetchall()]
 
 
 def rrf_score(ranks: dict[str, int], weights: dict[str, float], k: int = SEARCH_RRF_K) -> float:
@@ -134,6 +215,16 @@ def _project_filter(project: str | None) -> tuple[str, list]:
     return "", []
 
 
+def _resolve_as_of(as_of: str | None, warnings: list[str]) -> str | None:
+    if not as_of:
+        return None
+    d = parse_date_strict(as_of)
+    if not d:
+        warnings.append(f"фильтр --as-of игнорирован: неверная дата «{as_of}»")
+        return None
+    return d.isoformat()
+
+
 def _metadata_filters(
     *,
     law: str | None = None,
@@ -142,15 +233,34 @@ def _metadata_filters(
 ) -> tuple[str, list]:
     parts: list[str] = []
     params: list = []
-    if law:
-        parts.append(" AND a.metadata->>'law' ILIKE %s")
-        params.append(law)
+    lp = law_ilike_pattern(law)
+    if lp:
+        parts.append(
+            " AND (a.metadata->>'law' ILIKE %s OR a.metadata->>'standard' ILIKE %s)"
+        )
+        params.extend([lp, lp])
     if doc_kind:
         parts.append(" AND a.metadata->>'doc_kind' = %s")
         params.append(doc_kind)
     if as_of:
         parts.append(
-            " AND (a.metadata->>'effective_date' IS NULL OR a.metadata->>'effective_date' <= %s)"
+            """
+            AND v.id = (
+              SELECT v2.id FROM versions v2
+              WHERE v2.source_id = s.id
+                AND EXISTS (
+                  SELECT 1 FROM atoms a2
+                  WHERE a2.version_id = v2.id AND a2.status = 'active'
+                    AND (a2.metadata->>'effective_date') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                    AND (a2.metadata->>'effective_date')::date <= %s::date
+                )
+              ORDER BY (
+                SELECT max((a3.metadata->>'effective_date')::date)
+                FROM atoms a3 WHERE a3.version_id = v2.id AND a3.status = 'active'
+              ) DESC NULLS LAST, v2.version_no DESC
+              LIMIT 1
+            )
+            """
         )
         params.append(as_of)
     return "".join(parts), params
@@ -359,36 +469,45 @@ def search_fts_only(
     *,
     project: str | None = None,
     limit: int = 10,
+    law: str | None = None,
+    doc_kind: str | None = None,
+    as_of: str | None = None,
+    warnings: list[str] | None = None,
 ) -> SearchResult:
-    """Только FTS + ILIKE, порядок как в v1.7 (без RRF)."""
+    """Только FTS + ILIKE; фильтры и metadata-leg как в hybrid."""
+    warnings = list(warnings or [])
+    as_of = _resolve_as_of(as_of, warnings)
+    meta_sql, meta_params = _metadata_filters(law=law, doc_kind=doc_kind, as_of=as_of)
+    sq = parse_structured_query(query)
     leg_cur = conn.cursor()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     ordered_ids: list[int] = []
+    for aid in leg_metadata_ids(
+        leg_cur, sq, project, limit, False, meta_sql, meta_params
+    ):
+        ordered_ids.append(aid)
     tq = fts_query(query)
     if tq:
-        pf, pp = _project_filter(project)
-        sql = f"""
-            SELECT a.id FROM atoms a
-            JOIN versions v ON a.version_id = v.id
-            JOIN sources s ON a.document_id = s.id
-            WHERE a.status = 'active'
-              AND a.tsv @@ to_tsquery('public.ru_en', %s){pf}
-            ORDER BY ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) DESC LIMIT %s
-        """
-        leg_cur.execute(sql, [tq, tq] + pp + [limit])
-        ordered_ids = [r[0] for r in leg_cur.fetchall()]
+        for aid, _ in leg_fts(
+            leg_cur, query, project, limit, False, meta_sql, meta_params
+        ):
+            if aid not in ordered_ids and len(ordered_ids) < limit:
+                ordered_ids.append(aid)
     if len(ordered_ids) < limit:
         seen = set(ordered_ids)
-        for aid in leg_ilike(leg_cur, query, project, limit, False):
+        for aid in leg_ilike(
+            leg_cur, query, project, limit, False, meta_sql, meta_params
+        ):
             if aid not in seen and len(ordered_ids) < limit:
                 ordered_ids.append(aid)
                 seen.add(aid)
     hits = []
-    for aid in ordered_ids:
+    for aid in ordered_ids[:limit]:
         row = _fetch_base_row(cur, aid)
         if not row:
             continue
         meta = row["metadata"] or {}
+        exact = _exact_match(row["content"], meta, sq)
         hits.append(
             Hit(
                 atom_id=aid,
@@ -401,8 +520,13 @@ def search_fts_only(
                 matched_by=["fts"] if tq else ["ilike"],
                 ranks={},
                 score=0.0,
+                exact=exact,
             )
         )
+    if sq.article or sq.point or sq.section or sq.standard:
+        exact_tier = [h for h in hits if h.exact]
+        other = [h for h in hits if not h.exact]
+        hits = exact_tier + other
     if hits:
         lcur = conn.cursor()
         lm = linked_by_atom(lcur, [h.atom_id for h in hits])
@@ -419,7 +543,7 @@ def search_fts_only(
         lcur.close()
     leg_cur.close()
     cur.close()
-    return SearchResult(results=hits, warnings=[], mode_used="fts", legs={})
+    return SearchResult(results=hits[:limit], warnings=warnings, mode_used="fts", legs={})
 
 
 def search(
@@ -442,8 +566,23 @@ def search(
     if mode not in ("fts", "vector", "hybrid"):
         raise ValueError(f"неизвестный mode: {mode}")
 
+    as_of_resolved = _resolve_as_of(as_of, warnings)
+    meta_sql, meta_params = _metadata_filters(
+        law=law, doc_kind=doc_kind, as_of=as_of_resolved
+    )
+    sq = parse_structured_query(query)
+
     if mode == "fts":
-        return search_fts_only(conn, query, project=project, limit=limit)
+        return search_fts_only(
+            conn,
+            query,
+            project=project,
+            limit=limit,
+            law=law,
+            doc_kind=doc_kind,
+            as_of=as_of_resolved,
+            warnings=warnings,
+        )
 
     if provider is None and mode in ("hybrid", "vector"):
         provider, pw = resolve_provider()
@@ -453,11 +592,21 @@ def search(
     leg_cur = conn.cursor()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     legs: dict[str, int] = {}
-    rank_maps: dict[str, dict[int, int]] = {"fts": {}, "ilike": {}, "vector": {}}
+    rank_maps: dict[str, dict[int, int]] = {
+        "fts": {},
+        "ilike": {},
+        "vector": {},
+        "meta": {},
+    }
     sim_map: dict[int, float] = {}
 
     leg_k = max(SEARCH_LEG_K, limit)
-    meta_sql, meta_params = _metadata_filters(law=law, doc_kind=doc_kind, as_of=as_of)
+
+    meta_ids = leg_metadata_ids(
+        leg_cur, sq, project or None, leg_k, include_superseded, meta_sql, meta_params
+    )
+    for i, aid in enumerate(meta_ids, 1):
+        rank_maps.setdefault("meta", {})[aid] = i
 
     if mode in ("fts", "hybrid"):
         fts_rows = leg_fts(
@@ -559,16 +708,25 @@ def search(
         cur.close()
         return SearchResult(results=[], warnings=warnings, mode_used="vector", legs=legs)
 
-    all_ids = set(rank_maps["fts"]) | set(rank_maps["ilike"]) | set(rank_maps["vector"])
-    weights = {"fts": SEARCH_W_FTS, "ilike": SEARCH_W_ILIKE, "vector": SEARCH_W_VEC}
+    all_ids = (
+        set(rank_maps["fts"])
+        | set(rank_maps["ilike"])
+        | set(rank_maps["vector"])
+        | set(rank_maps.get("meta", {}))
+    )
+    weights = {
+        "fts": SEARCH_W_FTS,
+        "ilike": SEARCH_W_ILIKE,
+        "vector": SEARCH_W_VEC,
+        "meta": SEARCH_W_FTS,
+    }
     scored: list[tuple[float, int, Hit]] = []
-    identifiers = extract_identifiers(query)
 
     for aid in all_ids:
         ranks = {}
         matched = []
-        for leg in ("fts", "ilike", "vector"):
-            if aid in rank_maps[leg]:
+        for leg in ("meta", "fts", "ilike", "vector"):
+            if aid in rank_maps.get(leg, {}):
                 ranks[leg] = rank_maps[leg][aid]
                 matched.append(leg)
         if not ranks:
@@ -580,7 +738,7 @@ def search(
         if atom_types and row["atom_type"] not in atom_types:
             continue
         meta = row["metadata"] or {}
-        exact = _exact_match(row["content"], meta, identifiers)
+        exact = _exact_match(row["content"], meta, sq)
         note = None
         if matched == ["vector"]:
             note = "семантическое совпадение — проверьте формулировку по цитате"
@@ -605,11 +763,11 @@ def search(
     scored.sort(key=lambda x: (-x[0], x[1], x[2].atom_id))
     hits = [h for _, _, h in scored]
 
-    if identifiers:
+    if sq.article or sq.point or sq.section or sq.standard:
         exact_tier = [h for h in hits if h.exact]
         other = [h for h in hits if not h.exact]
         exact_tier.sort(key=lambda h: (-h.score, h.ranks.get("fts", 10**9), h.atom_id))
-        other.sort(key=lambda h: (-h.score, h.ranks.get("fts", 10**9), h.atom_id))
+        other.sort(key=lambda h: (-h.ranks.get("meta", 10**9), -h.score, h.atom_id))
         hits = exact_tier + other
 
     hits = _dedupe_content(hits)[:limit]

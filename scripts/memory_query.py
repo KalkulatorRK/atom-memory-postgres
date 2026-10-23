@@ -135,7 +135,15 @@ def main():
     conn = psycopg2.connect(dsn)
     cur = conn.cursor()
 
-    if args.mode == "fts" and not args.json and not args.explain:
+    use_legacy_fts = (
+        args.mode == "fts"
+        and not args.json
+        and not args.explain
+        and not args.law
+        and not args.doc_kind
+        and not args.as_of
+    )
+    if use_legacy_fts:
         out = run_fts_legacy(cur, args.query, args.project, args.limit)
         cur.close()
         conn.close()
@@ -143,7 +151,7 @@ def main():
         return
 
     cur.close()
-    as_of = normalize_date(args.as_of) if args.as_of else None
+    as_of = args.as_of or None
     sr = search(
         conn,
         args.query,

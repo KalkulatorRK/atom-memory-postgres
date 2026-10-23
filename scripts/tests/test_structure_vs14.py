@@ -22,7 +22,7 @@ def db_ready():
 
 from import_document import quality_gate, smart_split  # noqa: E402
 from render_role_password_sql import render_role_password_sql  # noqa: E402
-from search_core import _exact_match, extract_identifiers  # noqa: E402
+from search_core import _exact_match, parse_structured_query  # noqa: E402
 from structure import (  # noqa: E402
     DocImportOptions,
     detect_doc_kind,
@@ -150,8 +150,9 @@ class CitationTests(unittest.TestCase):
 
     def test_exact_match_article_point(self):
         meta = {"article": "475", "point": "2"}
-        ids = extract_identifiers("п. 2 ст. 475")
-        self.assertTrue(_exact_match("текст", meta, ids))
+        sq = parse_structured_query("п. 2 ст. 475")
+        self.assertTrue(_exact_match("текст", meta, sq))
+        self.assertFalse(_exact_match("текст", {"article": "476", "point": "1"}, sq))
 
 
 class RoleSecurityUnitTests(unittest.TestCase):
@@ -166,7 +167,7 @@ class RoleSecurityUnitTests(unittest.TestCase):
 
 @pytest.mark.db
 def test_as_of_filter(db_ready):
-    """V50: --as-of отсекает атомы с более поздней effective_date."""
+    """V50: --as-of выбирает последнюю редакцию на дату."""
     import json
 
     import psycopg2
@@ -178,48 +179,54 @@ def test_as_of_filter(db_ready):
     conn = psycopg2.connect(dsn)
     cur = conn.cursor()
     proj = f"law_asof_{uuid.uuid4().hex[:8]}"
-    cur.execute("INSERT INTO projects (name) VALUES (%s) RETURNING id", (proj,))
-    pid = cur.fetchone()[0]
-    cur.execute(
-        "INSERT INTO sources (project_id, title, source_type, location, content_sha, content_size) "
-        "VALUES (%s, 't', 'pdf', %s, 'a', 1) RETURNING id",
-        (pid, f"/tmp/{proj}.pdf"),
-    )
-    sid = cur.fetchone()[0]
-    cur.execute(
-        "INSERT INTO versions (source_id, version_no, sha256) VALUES (%s, 1, 'a') RETURNING id",
-        (sid,),
-    )
-    vid = cur.fetchone()[0]
-    for eff, art in (("2020-01-01", "old"), ("2024-06-01", "new")):
+    sid = pid = None
+    try:
+        cur.execute("INSERT INTO projects (name) VALUES (%s) RETURNING id", (proj,))
+        pid = cur.fetchone()[0]
         cur.execute(
-            "INSERT INTO atoms (version_id, document_id, atom_type, ordinal, content, metadata) "
-            "VALUES (%s, %s, 'text', %s, %s, %s::jsonb)",
-            (
-                vid,
-                sid,
-                1 if art == "old" else 2,
-                f"статья {art} текст достаточной длины для индексации",
-                json.dumps(
-                    {
-                        "article": art,
-                        "effective_date": eff,
-                        "doc_kind": "code",
-                        "law": "TEST",
-                    },
-                    ensure_ascii=False,
-                ),
-            ),
+            "INSERT INTO sources (project_id, title, source_type, location, content_sha, content_size) "
+            "VALUES (%s, 't', 'pdf', %s, 'a', 1) RETURNING id",
+            (pid, f"/tmp/{proj}.pdf"),
         )
-    conn.commit()
-    sr = search(conn, "статья", project=proj, limit=10, mode="fts", as_of="2022-01-01")
-    arts = {(h.metadata or {}).get("article") for h in sr.results}
-    assert arts == {"old"}
-    cur.execute("DELETE FROM sources WHERE id = %s", (sid,))
-    cur.execute("DELETE FROM projects WHERE id = %s", (pid,))
-    conn.commit()
-    cur.close()
-    conn.close()
+        sid = cur.fetchone()[0]
+        for vno, eff, art in ((1, "2020-01-01", "old"), (2, "2024-06-01", "new")):
+            cur.execute(
+                "INSERT INTO versions (source_id, version_no, sha256) VALUES (%s, %s, %s) RETURNING id",
+                (sid, vno, f"sha{vno}"),
+            )
+            vid = cur.fetchone()[0]
+            cur.execute(
+                "INSERT INTO atoms (version_id, document_id, atom_type, ordinal, content, metadata) "
+                "VALUES (%s, %s, 'text', 1, %s, %s::jsonb)",
+                (
+                    vid,
+                    sid,
+                    f"статья {art} текст достаточной длины для индексации",
+                    json.dumps(
+                        {
+                            "article": art,
+                            "effective_date": eff,
+                            "doc_kind": "code",
+                            "law": "TEST",
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+        conn.commit()
+        sr = search(conn, "статья", project=proj, limit=10, mode="fts", as_of="2022-01-01")
+        arts = {(h.metadata or {}).get("article") for h in sr.results}
+        assert arts == {"old"}
+    finally:
+        try:
+            if sid:
+                cur.execute("DELETE FROM sources WHERE id = %s", (sid,))
+            if pid:
+                cur.execute("DELETE FROM projects WHERE id = %s", (pid,))
+            conn.commit()
+        finally:
+            cur.close()
+            conn.close()
 
 
 if __name__ == "__main__":

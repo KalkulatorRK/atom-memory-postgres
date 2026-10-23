@@ -61,15 +61,22 @@ def _seed_atom(conn, content: str):
 
 
 @pytest.mark.parametrize(
-    "query,needle",
+    "query,meta,needle",
     [
-        ("ст. 475", "475"),
-        ("ГОСТ 7512-82", "7512-82"),
-        ("12", "12"),
-        ("v11", "v11"),
+        ("ст. 475", {"article": "475", "doc_kind": "code", "law": "ГК РФ"}, "475"),
+        (
+            "ГОСТ 7512-82",
+            {"standard": "ГОСТ 7512-82", "doc_kind": "gost"},
+            "7512-82",
+        ),
+        (
+            "п. 2 ст. 475",
+            {"article": "475", "point": "2", "doc_kind": "code", "law": "ГК РФ"},
+            "пункт два",
+        ),
     ],
 )
-def test_hybrid_identifier_exact_tier_ranks_first(conn, query, needle):
+def test_hybrid_identifier_exact_tier_ranks_first(conn, query, meta, needle):
     import uuid
 
     proj = f"pr1_rank_{uuid.uuid4().hex[:10]}"
@@ -95,8 +102,13 @@ def test_hybrid_identifier_exact_tier_ranks_first(conn, query, needle):
     )
     cur.execute(
         "INSERT INTO atoms (version_id, document_id, atom_type, ordinal, content, metadata) "
-        "VALUES (%s,%s,'text',2,%s,'{}'::jsonb) RETURNING id",
-        (vid, sid, f"статья 475 ГОСТ 7512-82 v11 номер 12 {needle}"),
+        "VALUES (%s,%s,'text',2,%s,%s::jsonb) RETURNING id",
+        (
+            vid,
+            sid,
+            f"статья 475 ГОСТ 7512-82 v11 номер 12 {needle}",
+            json.dumps(meta, ensure_ascii=False),
+        ),
     )
     target_id = cur.fetchone()[0]
     conn.commit()
@@ -116,8 +128,10 @@ def test_hybrid_identifier_exact_tier_ranks_first(conn, query, needle):
 
 
 def test_exact_match_python_word_boundaries():
-    ids = extract_identifiers("ст. 475")
-    assert _exact_match("текст ст. 475 далее", {}, ids)
+    from search_core import parse_structured_query
+
+    sq = parse_structured_query("ст. 475")
+    assert _exact_match("текст ст. 475 далее", {"article": "475"}, sq)
 
 
 def test_hnsw_index_name_matches_migration():

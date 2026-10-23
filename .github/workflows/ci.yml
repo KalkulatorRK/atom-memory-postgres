@@ -47,6 +47,7 @@ jobs:
 
   setup-no-admin-dsn:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     services:
       postgres:
         image: pgvector/pgvector:pg16
@@ -98,6 +99,7 @@ jobs:
 
   tests:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

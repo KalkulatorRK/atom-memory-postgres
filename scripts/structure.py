@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
 
 PAGE_MARK = re.compile(r"<!-- страница (\d+) -->")
@@ -51,6 +52,21 @@ RE_STANDARD_TITLE = re.compile(
     r"\b((?:ГОСТ(?:\s*Р)?|СДАНК|СТО|ISO)\s*[-\w.]+)",
     re.IGNORECASE,
 )
+RE_ARTICLE_HEADING = re.compile(r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)\b")
+RE_ARTICLE_HEADING_CI = re.compile(
+    r"^(?:Статья|СТАТЬЯ|статья)\s+(\d+(?:\.\d+)?)\b", re.IGNORECASE
+)
+RE_ARTICLE_INLINE = re.compile(
+    r"(?<=[.;!?])\s+(?=(?:Статья|СТАТЬЯ)\s+\d+)", re.IGNORECASE
+)
+RE_CASUAL_ARTICLE = re.compile(r"(?:^|[\s,.;(])стать(?:я|и|ей|ю)\s+\d+")
+RE_GOST_SECTION_STRICT = re.compile(
+    r"^(\d+(?:\.\d+){0,4})\s+([A-ZА-ЯЁ«\"].*)"
+)
+RE_INTRO_DATE = re.compile(
+    r"(?:Дата\s+введения|дата\s+введения)\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})",
+    re.IGNORECASE,
+)
 
 PART_WORDS = {
     "первая": "1",
@@ -73,6 +89,7 @@ class DocImportOptions:
 @dataclass
 class StructureContext:
     doc_kind: str | None = None
+    standard: str | None = None
     law: str | None = None
     chapter: str | None = None
     article: str | None = None
@@ -90,6 +107,8 @@ class StructureContext:
         m: dict[str, Any] = {}
         if self.doc_kind:
             m["doc_kind"] = self.doc_kind
+        if self.standard:
+            m["standard"] = self.standard
         if self.law:
             m["law"] = self.law
         if self.chapter:
@@ -125,17 +144,39 @@ class StructureContext:
         return copy.deepcopy(self)
 
 
-def normalize_date(raw: str | None) -> str | None:
+def parse_date_strict(raw: str | None) -> date | None:
     if not raw:
         return None
     s = raw.strip()
-    m = re.match(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})", s)
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        try:
+            return date.fromisoformat(s)
+        except ValueError:
+            return None
+    m = re.match(r"^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})$", s)
     if not m:
-        return s
+        return None
     d, mo, y = m.groups()
+    yi = int(y)
     if len(y) == 2:
-        y = "20" + y
-    return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
+        yi = 1900 + yi if yi >= 70 else 2000 + yi
+    try:
+        return date(yi, int(mo), int(d))
+    except ValueError:
+        return None
+
+
+def normalize_date(raw: str | None) -> str | None:
+    d = parse_date_strict(raw)
+    return d.isoformat() if d else None
+
+
+def law_ilike_pattern(law: str | None) -> str | None:
+    if not law:
+        return None
+    if "%" in law or "_" in law:
+        return law
+    return law.rstrip() + "%"
 
 
 def strip_colontituls(text: str) -> str:
@@ -154,6 +195,30 @@ def strip_colontituls(text: str) -> str:
     return "\n\n".join(out)
 
 
+def _line_starts_article(line: str) -> bool:
+    return bool(RE_ARTICLE_HEADING.match(line.strip()))
+
+
+def _count_structural_articles(text: str) -> int:
+    """Заголовки «Статья N» в начале строки (не «статья N договора»)."""
+    n = 0
+    for line in text.split("\n"):
+        if RE_ARTICLE_HEADING.match(line.strip()):
+            n += 1
+    return n
+
+
+def _count_gost_sections(text: str) -> int:
+    """Нумерация вида «4.2 Заголовок», не «1 Введение»."""
+    n = 0
+    for para in text.split("\n\n"):
+        for line in para.split("\n"):
+            m = RE_GOST_SECTION_STRICT.match(line.strip())
+            if m and "." in m.group(1):
+                n += 1
+    return n
+
+
 def detect_doc_kind(text: str, title: str, explicit: str) -> str | None:
     explicit = (explicit or "auto").lower()
     if explicit in ("code", "gost", "sdank"):
@@ -161,13 +226,13 @@ def detect_doc_kind(text: str, title: str, explicit: str) -> str | None:
     if explicit == "none":
         return None
     sample = f"{title}\n{text[:8000]}"
-    if len(re.findall(r"(?i)(?:^|\s)статья\s+\d+", text)) >= 2:
+    if _count_structural_articles(text) >= 2:
         return "code"
+    if RE_CASUAL_ARTICLE.search(text):
+        return None
     if re.search(r"(?i)\bСДАНК\b", sample):
         return "sdank"
-    if re.search(r"(?i)\bГОСТ(?:\s*Р)?\b", sample) or re.search(
-        r"^\d+(?:\.\d+){1,3}\s+\S", text, re.MULTILINE
-    ):
+    if re.search(r"(?i)\bГОСТ(?:\s*Р)?\b", sample) and _count_gost_sections(text) >= 2:
         return "gost"
     return None
 
@@ -180,14 +245,20 @@ def extract_document_meta(text: str, options: DocImportOptions) -> tuple[str | N
         if m:
             red = f"ред. от {m.group(1)}"
     if not eff:
-        m = RE_EFFECTIVE.search(text[:12000])
-        if m:
-            eff = normalize_date(m.group(1))
+        for rx in (RE_INTRO_DATE, RE_EFFECTIVE):
+            m = rx.search(text[:12000])
+            if m:
+                eff = normalize_date(m.group(1))
+                break
     law = None
+    standard = None
     m = RE_LAW.search(text[:5000]) or RE_LAW.search(options.source_title)
     if m:
         law = re.sub(r"\s+", " ", m.group(1)).strip()
-    return red, eff, law if law else None
+    sm = RE_STANDARD_TITLE.search(text[:5000]) or RE_STANDARD_TITLE.search(options.source_title)
+    if sm:
+        standard = sm.group(1).strip()
+    return red, eff, law if law else None, standard
 
 
 def _update_ctx_from_paragraph(ctx: StructureContext, para: str) -> bool:
@@ -226,10 +297,11 @@ def _update_ctx_from_paragraph(ctx: StructureContext, para: str) -> bool:
     m = RE_ANNEX.match(s)
     if m:
         ctx.annex = m.group(1)
-        ctx.section_path = [f"Приложение {ctx.annex}"]
+        ctx.section_path = []
+        ctx.point = None
         return True
 
-    m = RE_GOST_SECTION.match(s)
+    m = RE_GOST_SECTION_STRICT.match(s)
     if ctx.doc_kind in ("gost", "sdank") and m:
         num = m.group(1)
         depth = num.count(".")
@@ -239,7 +311,7 @@ def _update_ctx_from_paragraph(ctx: StructureContext, para: str) -> bool:
         else:
             path = path[:depth] + [num]
         ctx.section_path = path
-        ctx.point = num.split(".")[-1]
+        ctx.point = None
         return True
 
     m = RE_POINT.match(s)
@@ -254,6 +326,58 @@ def _update_ctx_from_paragraph(ctx: StructureContext, para: str) -> bool:
         return True
 
     return hard
+
+
+def _expand_structure_lines(para: str) -> list[str]:
+    out: list[str] = []
+    for raw in para.split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        parts = RE_ARTICLE_INLINE.split(line)
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            for seg in re.split(r"(?=(?:(?:Статья|СТАТЬЯ)\s+\d+))", p, flags=re.IGNORECASE):
+                seg = seg.strip()
+                if seg:
+                    out.append(seg)
+    return out or ([para.strip()] if para.strip() else [])
+
+
+def _merge_heading_atoms(atoms: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    i = 0
+    while i < len(atoms):
+        a = atoms[i]
+        content = a.get("content", "")
+        meta = a.get("structure_meta") or {}
+        if RE_ARTICLE_HEADING.match(content.strip()) and len(content) < 120 and i + 1 < len(atoms):
+            nxt = atoms[i + 1]
+            if (nxt.get("structure_meta") or {}).get("article") == meta.get("article"):
+                nxt = {**nxt, "content": content + " " + nxt["content"]}
+                merged.append(nxt)
+                i += 2
+                continue
+        merged.append(a)
+        i += 1
+    return merged
+
+
+def _attach_preamble(atoms: list[dict]) -> list[dict]:
+    if not atoms:
+        return atoms
+    pre: list[str] = []
+    rest = atoms
+    while rest and not (rest[0].get("structure_meta") or {}).get("article"):
+        pre.append(rest[0]["content"])
+        rest = rest[1:]
+    if pre and rest:
+        rest[0] = {**rest[0], "content": " ".join(pre + [rest[0]["content"]])}
+    elif pre:
+        return [{"content": " ".join(pre), "atom_type": "text", "structure_meta": atoms[0].get("structure_meta", {})}]
+    return rest
 
 
 def _split_sentences(text: str) -> list[str]:
@@ -299,29 +423,34 @@ def structure_split(
     blocks: list[tuple[StructureContext, str, int | None]] = []
     cur_ctx = ctx.copy()
     cur_page = page
+    block_start_page = page
     cur_parts: list[str] = []
     cur_key = cur_ctx.boundary_key()
 
     def flush():
-        nonlocal cur_parts, cur_key, cur_page
+        nonlocal cur_parts, block_start_page
         if not cur_parts:
             return
-        blocks.append((cur_ctx.copy(), " ".join(cur_parts), cur_page))
+        blocks.append((cur_ctx.copy(), " ".join(cur_parts), block_start_page))
         cur_parts = []
 
     for pg, para in paragraphs:
-        if pg is not None:
+        if pg is not None and pg != cur_page:
+            if cur_parts:
+                flush()
             cur_page = pg
             cur_ctx.page = pg
-        lines = [ln.strip() for ln in para.split("\n") if ln.strip()]
-        if not lines:
-            lines = [para.strip()] if para.strip() else []
+            block_start_page = cur_page
+        lines = _expand_structure_lines(para)
         for line in lines:
             new_ctx = cur_ctx.copy()
             hard = _update_ctx_from_paragraph(new_ctx, line)
             new_key = new_ctx.boundary_key()
             if hard or (cur_parts and new_key != cur_key):
                 flush()
+                block_start_page = cur_page
+            elif not cur_parts:
+                block_start_page = cur_page
             cur_ctx = new_ctx
             cur_key = new_key
             cur_parts.append(line)
@@ -359,13 +488,9 @@ def structure_split(
             merged[-1]["page"] = merged[-1].get("page") or a.get("page")
         else:
             merged.append(a)
+    merged = _merge_heading_atoms(merged)
     if ctx.doc_kind == "code":
-        merged = [
-            a
-            for a in merged
-            if a.get("structure_meta", {}).get("article")
-            or a.get("structure_meta", {}).get("section_path")
-        ]
+        merged = _attach_preamble(merged)
     return merged
 
 
@@ -380,10 +505,10 @@ def build_page_context_map(text: str, ctx: StructureContext) -> dict[int, dict[s
             page = int(marks[-1])
             cur.page = page
         body = PAGE_MARK.sub("", para).strip()
-        if body:
-            _update_ctx_from_paragraph(cur, body)
-        if page is not None:
-            out[page] = cur.metadata()
+        for line in _expand_structure_lines(body):
+            _update_ctx_from_paragraph(cur, line)
+            if page is not None:
+                out[page] = cur.metadata()
     return out
 
 
@@ -394,8 +519,10 @@ def prepare_for_import(
     kind = detect_doc_kind(cleaned, options.source_title, options.doc_kind)
     if not kind:
         return md, None, {}
-    red, eff, law = extract_document_meta(cleaned, options)
-    ctx = StructureContext(doc_kind=kind, law=law, redaction=red, effective_date=eff)
+    red, eff, law, standard = extract_document_meta(cleaned, options)
+    ctx = StructureContext(
+        doc_kind=kind, law=law, standard=standard, redaction=red, effective_date=eff
+    )
     if options.redaction:
         ctx.redaction_source = "param"
     elif red:
@@ -424,13 +551,13 @@ def format_citation(meta: dict, source_title: str) -> str:
         return f"{', '.join(parts)}{red_part}, стр. {page}"
 
     sp = meta.get("section_path")
-    title = source_title
-    m = RE_STANDARD_TITLE.search(source_title)
+    title = meta.get("standard") or meta.get("law") or source_title
+    m = RE_STANDARD_TITLE.search(title) or RE_STANDARD_TITLE.search(source_title)
     if m:
         title = m.group(1)
+    if meta.get("annex"):
+        return f"{title}, приложение {meta['annex']}{red_part}, стр. {page}"
     if sp:
         leaf = sp[-1] if isinstance(sp, list) else str(sp)
         return f"{title}, п. {leaf}{red_part}, стр. {page}"
-    if meta.get("annex"):
-        return f"{title}, приложение {meta['annex']}{red_part}, стр. {page}"
     return f"{title}{red_part}, стр. {page}"

@@ -18,13 +18,30 @@ def get_pg():
     return psycopg2.connect(PG_DSN)
 
 
-def search_atoms(query: str, project: str = "", limit: int = 5, mode: str = "hybrid"):
+def search_atoms(
+    query: str,
+    project: str = "",
+    limit: int = 5,
+    mode: str = "hybrid",
+    law: str = "",
+    doc_kind: str = "",
+    as_of: str = "",
+):
     from search_core import hit_to_dict, search
 
     limit = max(1, min(int(limit), 50))
     eff_limit = min(limit, 10)
     conn = get_pg()
-    sr = search(conn, query, project=project or None, limit=eff_limit, mode=mode)
+    sr = search(
+        conn,
+        query,
+        project=project or None,
+        limit=eff_limit,
+        mode=mode,
+        law=law or None,
+        doc_kind=doc_kind or None,
+        as_of=as_of or None,
+    )
     conn.close()
     return [hit_to_dict(h) for h in sr.results], sr.warnings
 
@@ -214,6 +231,12 @@ def _fallback_loop():
                                             "default": False,
                                             "description": "если true — JSON-объект с warnings вместо массива",
                                         },
+                                        "law": {"type": "string"},
+                                        "doc_kind": {
+                                            "type": "string",
+                                            "enum": ["", "code", "gost", "sdank"],
+                                        },
+                                        "as_of": {"type": "string"},
                                     },
                                 },
                             }
@@ -253,7 +276,13 @@ def _fallback_loop():
                         )
                         continue
                     res, warnings = search_atoms(
-                        args.get("query", ""), args.get("project", ""), limit, mode
+                        args.get("query", ""),
+                        args.get("project", ""),
+                        limit,
+                        mode,
+                        law=args.get("law", ""),
+                        doc_kind=args.get("doc_kind", ""),
+                        as_of=args.get("as_of", ""),
                     )
                     include_w = mcp_include_warnings(inc_w)
                     if warnings and not include_w:
@@ -297,15 +326,27 @@ def main():
             limit: int = 5,
             mode: str = "hybrid",
             include_warnings: bool = False,
+            law: str = "",
+            doc_kind: str = "",
+            as_of: str = "",
         ) -> str:
             """Поиск по атомной базе знаний (FTS, вектор или гибрид).
 
             query — текст запроса; project — имя проекта или пусто для всех;
             limit — число результатов (до 10); mode — fts | vector | hybrid;
+            law/doc_kind/as_of — фильтры цитат (как в memory_query.py);
             include_warnings — если True, вернуть JSON с полем warnings (иначе текст/массив как раньше).
             """
             try:
-                res, warnings = search_atoms(query, project, min(limit, 10), mode)
+                res, warnings = search_atoms(
+                    query,
+                    project,
+                    min(limit, 10),
+                    mode,
+                    law=law,
+                    doc_kind=doc_kind,
+                    as_of=as_of,
+                )
                 if include_warnings:
                     return format_memory_search_response(
                         res, warnings, include_warnings=True
