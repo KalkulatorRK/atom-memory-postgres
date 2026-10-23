@@ -4,20 +4,21 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# Заголовок: «Статья 12. Название» или «Статья 12 — Название» (не «…12 настоящего Кодекса»).
+# Заголовок: «Статья 12. Название» / «Статья 12 — …» / голая «Статья 1».
 RE_ARTICLE_HEADING_STRICT = re.compile(
-    r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)"
+    r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)*)"
     r"(?:\.\s+[0-9A-ZА-ЯЁ«\"(]|(?:\s*[—–-]\s*[0-9A-ZА-ЯЁ«\"(]))"
 )
+RE_ARTICLE_BARE = re.compile(r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)*)\s*$")
 RE_ARTICLE_REFERENCE = re.compile(
-    r"^(?:Статья|СТАТЬЯ|статья)\s+(\d+(?:\.\d+)?)\s+"
+    r"^(?:Статья|СТАТЬЯ|статья)\s+(\d+(?:\.\d+)*)\s+"
     r"(?:настоящего|данного|этого|указанного|вышеупомянутого|кодекса)\b",
     re.IGNORECASE,
 )
 RE_ARTICLE_LOW_HEADING = re.compile(
-    r"^статья\s+(\d+(?:\.\d+)?)\.\s+[A-ZА-ЯЁ«\"(]"
+    r"^статья\s+(\d+(?:\.\d+)*)\.\s+[A-ZА-ЯЁ«\"(]"
 )
-RE_INLINE_ARTICLE = re.compile(r"(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)")
+RE_INLINE_ARTICLE = re.compile(r"(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)*)")
 
 RE_ABBREV_BEFORE_DOT = re.compile(
     r"(?i)\b(?:п|пп|ст|ч|разд|подп|абз|§|\d+)\.\s*$"
@@ -26,7 +27,7 @@ RE_ABBREV_BEFORE_DOT = re.compile(
 
 @dataclass
 class ArticleHeadingState:
-    last_article: float | None = None
+    last_article: tuple[int, ...] | None = None
     lowercase_headings: bool = False
 
 
@@ -36,22 +37,36 @@ def detect_lowercase_heading_style(text: str) -> bool:
         s = line.strip()
         if RE_ARTICLE_LOW_HEADING.match(s):
             lower += 1
-        elif RE_ARTICLE_HEADING_STRICT.match(s):
+        elif RE_ARTICLE_HEADING_STRICT.match(s) or RE_ARTICLE_BARE.match(s):
             upper += 1
     return lower >= 2 and lower > upper
 
 
-def _article_num(raw: str) -> float | None:
+def article_number_tuple(raw: str) -> tuple[int, ...] | None:
     try:
-        return float(raw.replace(",", "."))
+        return tuple(int(p) for p in raw.split("."))
     except ValueError:
         return None
 
 
-def _monotonic_increase(state: ArticleHeadingState, num: float) -> bool:
+def is_capital_article_heading(s: str) -> bool:
+    return bool(
+        RE_ARTICLE_HEADING_STRICT.match(s)
+        or RE_ARTICLE_BARE.match(s)
+    )
+
+
+def _accept_monotonic(
+    state: ArticleHeadingState, num: tuple[int, ...], *, lowercase: bool
+) -> bool:
     if state.last_article is None:
         return True
-    return num > state.last_article
+    if num > state.last_article:
+        return True
+    if not lowercase and num < state.last_article:
+        # оглавление / новый раздел: сброс нумерации
+        return True
+    return False
 
 
 def is_real_sentence_end_before(text: str) -> bool:
@@ -81,8 +96,11 @@ def accept_article_heading(
         return None, None
 
     num_s: str | None = None
+    lowercase = False
     if RE_ARTICLE_HEADING_STRICT.match(s):
         num_s = RE_ARTICLE_HEADING_STRICT.match(s).group(1)
+    elif RE_ARTICLE_BARE.match(s):
+        num_s = RE_ARTICLE_BARE.match(s).group(1)
     elif (
         doc_kind == "code"
         and state.lowercase_headings
@@ -91,12 +109,13 @@ def accept_article_heading(
         if prev_line and not is_real_sentence_end_before(prev_line):
             return None, None
         num_s = RE_ARTICLE_LOW_HEADING.match(s).group(1)
+        lowercase = True
 
     if not num_s:
         return None, None
 
-    num = _article_num(num_s)
-    if num is None or not _monotonic_increase(state, num):
+    num = article_number_tuple(num_s)
+    if num is None or not _accept_monotonic(state, num, lowercase=lowercase):
         return None, None
 
     state.last_article = num
@@ -117,7 +136,10 @@ def split_inline_article_segments(line: str) -> list[str]:
         if not is_real_sentence_end_before(before):
             continue
         candidate = line[start:].lstrip()
-        if not RE_ARTICLE_HEADING_STRICT.match(candidate):
+        if not (
+            RE_ARTICLE_HEADING_STRICT.match(candidate)
+            or RE_ARTICLE_BARE.match(candidate)
+        ):
             continue
         chunk = line[pos:start].strip()
         if chunk:

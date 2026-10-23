@@ -96,6 +96,14 @@ def _normalize_is_numbered_heading(s: str) -> bool:
         return False
     if re.match(r"^\d+\s+Федерального\s+зак", s, re.IGNORECASE):
         return False
+    if re.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}\b", s):
+        return False
+    if re.match(r"^\d+\)\s+\S", s):
+        return True
+    if re.match(r"^\d+(?:\.\d+)+\.\s+\S", s):
+        return True
+    if re.match(r"^\d+\.\s+\S", s):
+        return True
     m = re.match(r"^(\d+(?:\.\d+)*)\s+(\S)", s)
     if not m:
         return False
@@ -119,6 +127,7 @@ def normalize_text(md: str) -> str:
             s.startswith('<!--') or s.startswith('#') or s.startswith('- ') or
             s.startswith('* ') or s.startswith('|') or
             re.match(r'^(?:Статья|СТАТЬЯ)\s+\d', s) or
+            re.match(r'^статья\s+\d+(?:\.\d+)*\.\s+[A-ZА-ЯЁ]', s) or
             re.match(r'^(?:Глава|ГЛАВА|Раздел|РАЗДЕЛ|Часть)\s', s, re.IGNORECASE) or
             _normalize_is_numbered_heading(s) or
             s.startswith(('Приложение', 'ГОСТ', 'Таблица', 'Примечание', 'ПРИЛОЖЕНИЕ'))

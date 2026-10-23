@@ -76,14 +76,14 @@ class PdfWrapRegressionTests(unittest.TestCase):
             and "Покупатель" not in a["content"]
         ]
         self.assertFalse(wrap_fake)
-        in474 = [
+        p474_2 = [
             a
             for a in atoms
             if a.get("structure_meta", {}).get("article") == "474"
-            and "статья 475. Иные" in a["content"]
-            and "Обязательные требования" in a["content"]
+            and a.get("structure_meta", {}).get("point") == "2"
         ]
-        self.assertTrue(in474)
+        self.assertTrue(p474_2)
+        self.assertIn("статья 475. Иные", p474_2[0]["content"])
 
     def test_gost_wrap_no_article_metadata(self):
         lines = [

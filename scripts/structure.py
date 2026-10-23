@@ -36,7 +36,7 @@ RE_SECTION_CODE = re.compile(
     r"^(?:Раздел|РАЗДЕЛ|Подраздел|ПОДРАЗДЕЛ)\s+([IVX\d]+)",
     re.IGNORECASE,
 )
-RE_POINT = re.compile(r"^(\d+)\.\s+")
+RE_POINT = re.compile(r"^(\d+(?:\.\d+)*)\.\s+")
 RE_SUBPOINT = re.compile(r"^(\d+)\)\s+")
 RE_GOST_SECTION = re.compile(r"^(\d+(?:\.\d+){0,4})\s+(?=\S)")
 RE_ANNEX = re.compile(
@@ -59,15 +59,20 @@ RE_STANDARD_TITLE = re.compile(
     r"\b("
     r"(?:ГОСТ(?:\s*Р)?\s*[-\d][-\w]*"
     r"|СДАНК[-\w]+"
-    r"|СТО\s+(?:Газпром|[A-Za-zА-Яа-яЁё][\w\s-]*?)(?:\s+\d[\d.]*)?"
+    r"|СТО\s+(?:Газпром\s+[\d][-\d.]+|\d+[-\d.]+|[A-Za-zА-Яа-яЁё][\w\s-]*[\d][-\d.]*)"
     r"|ISO\s*[-\d][-\w]*)"
     r")(?=[\s,.;]|$)",
     re.IGNORECASE,
 )
+RE_LAW_FZ = re.compile(r"\b(\d{1,4}-ФЗ)\b", re.IGNORECASE)
+RE_LAW_FULL = re.compile(
+    r"(?i)\b((?:Гражданский|Уголовный|Трудовой|Налоговый|Кодекс)\s+[^\n]{0,80}?(?:\d{1,4}-ФЗ|РФ))"
+)
 RE_FZ_LINE = re.compile(r"^\d+\s+Федерального\s+зак", re.IGNORECASE)
 RE_DANGLING_REF = re.compile(
-    r"(?i)(?:статьей|статьи|статью|со|к)\s*$"
+    r"(?i)(?:\bстатьей|\bстатьи|\bстатью|\bсо|\bк)\s*$"
 )
+RE_DATE_LINE = re.compile(r"^\d{1,2}\.\d{1,2}\.\d{2,4}\b")
 RE_ARTICLE_HEADING = re.compile(r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)\b")
 RE_ARTICLE_HEADING_CI = re.compile(
     r"^(?:Статья|СТАТЬЯ|статья)\s+(\d+(?:\.\d+)?)\b", re.IGNORECASE
@@ -213,13 +218,13 @@ def _line_starts_article(line: str) -> bool:
 
 
 def _count_structural_articles(text: str) -> int:
-    """Только capital «Статья N.» / «Статья N —» (не переносы PDF)."""
-    from structure_headings import RE_ARTICLE_HEADING_STRICT
+    """Capital «Статья N» (strict или голая строка)."""
+    from structure_headings import RE_ARTICLE_BARE, RE_ARTICLE_HEADING_STRICT
 
     n = 0
     for line in text.split("\n"):
         s = line.strip()
-        if RE_ARTICLE_HEADING_STRICT.match(s):
+        if RE_ARTICLE_HEADING_STRICT.match(s) or RE_ARTICLE_BARE.match(s):
             n += 1
     return n
 
@@ -253,32 +258,69 @@ def detect_doc_kind(text: str, title: str, explicit: str) -> str | None:
     return None
 
 
-def extract_document_meta(text: str, options: DocImportOptions) -> tuple[str | None, str | None, str | None]:
+def _document_header_blob(text: str, source_title: str) -> str:
+    """Шапка: title + абзацы до первой статьи/тела кодекса."""
+    from structure_headings import RE_ARTICLE_BARE, RE_ARTICLE_HEADING_STRICT
+
+    chunks = [source_title]
+    for para in text.split("\n\n"):
+        first = para.strip().split("\n")[0].strip() if para.strip() else ""
+        if RE_ARTICLE_HEADING_STRICT.match(first) or RE_ARTICLE_BARE.match(first):
+            break
+        if re.match(r"^\d+\.\s+[A-ZА-ЯЁ]", first):
+            break
+        chunks.append(para)
+        if len("\n\n".join(chunks)) > 5000:
+            break
+    return "\n\n".join(chunks)
+
+
+def extract_document_meta(
+    text: str, options: DocImportOptions
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    header = _document_header_blob(text, options.source_title)
     red = options.redaction
     eff = normalize_date(options.effective_date)
     if not red:
-        m = RE_REDACTION.search(text[:12000])
+        m = RE_REDACTION.search(header)
         if m:
             red = f"ред. от {m.group(1)}"
     if not eff:
-        for rx in (RE_INTRO_DATE, RE_EFFECTIVE):
-            m = rx.search(text[:12000])
-            if m:
-                eff = normalize_date(m.group(1))
-                break
+        m = RE_INTRO_DATE.search(header)
+        if m:
+            eff = normalize_date(m.group(1))
     if not eff and red:
         m = RE_REDACTION.search(red)
         if m:
             eff = normalize_date(m.group(1))
+    body_red = RE_REDACTION.search(text[ len(header) :])
+    body_eff = RE_EFFECTIVE.search(text[len(header) :])
+    meta_warn: str | None = None
+    if body_red and not RE_REDACTION.search(header):
+        meta_warn = "redaction_in_body_ignored"
+    if body_eff and eff and RE_REDACTION.search(header):
+        meta_warn = meta_warn or "effective_in_body_ignored"
     law = None
     standard = None
-    m = RE_LAW.search(text[:5000]) or RE_LAW.search(options.source_title)
-    if m:
-        law = re.sub(r"\s+", " ", m.group(1)).strip()
-    sm = RE_STANDARD_TITLE.search(text[:5000]) or RE_STANDARD_TITLE.search(options.source_title)
+    for blob in (header, text[:8000], options.source_title):
+        m = RE_LAW.search(blob)
+        if m:
+            law = re.sub(r"\s+", " ", m.group(1)).strip()
+            break
+        m = RE_LAW_FZ.search(blob)
+        if m:
+            law = m.group(1).upper().replace("фз", "ФЗ")
+            break
+        m = RE_LAW_FULL.search(blob)
+        if m:
+            law = re.sub(r"\s+", " ", m.group(1)).strip()[:120]
+            break
+    sm = RE_STANDARD_TITLE.search(header) or RE_STANDARD_TITLE.search(text[:8000])
+    if not sm:
+        sm = RE_STANDARD_TITLE.search(options.source_title)
     if sm:
         standard = sm.group(1).strip()
-    return red, eff, law if law else None, standard
+    return red, eff, law if law else None, standard, meta_warn
 
 
 def _update_ctx_from_paragraph(
@@ -333,7 +375,11 @@ def _update_ctx_from_paragraph(
 
     m = RE_GOST_SECTION_STRICT.match(s)
     if ctx.doc_kind in ("gost", "sdank") and m:
-        if RE_FZ_LINE.match(s) or RE_DANGLING_REF.search(prev_line.strip()):
+        if (
+            RE_FZ_LINE.match(s)
+            or RE_DATE_LINE.match(s)
+            or RE_DANGLING_REF.search(prev_line.strip())
+        ):
             return False
         num = m.group(1)
         depth = num.count(".")
@@ -577,7 +623,7 @@ def prepare_for_import(
     kind = detect_doc_kind(cleaned, options.source_title, options.doc_kind)
     if not kind:
         return md, None, {}
-    red, eff, law, standard = extract_document_meta(cleaned, options)
+    red, eff, law, standard, meta_warn = extract_document_meta(cleaned, options)
     ctx = StructureContext(
         doc_kind=kind, law=law, standard=standard, redaction=red, effective_date=eff
     )
@@ -586,7 +632,12 @@ def prepare_for_import(
     elif red:
         ctx.redaction_source = "auto"
     page_map = build_page_context_map(cleaned, ctx)
-    if (
+    if meta_warn == "redaction_in_body_ignored":
+        print(
+            "      ⚠ «ред. от …» найдено только в тексте статей — effective_date не задан",
+            file=sys.stderr,
+        )
+    elif (
         ctx.doc_kind == "code"
         and not ctx.effective_date
         and RE_REDACTION.search(cleaned[:8000])
