@@ -84,6 +84,11 @@ RE_CHAPTER_NUMBER = re.compile(
     r"^(?:Глава|ГЛАВА)\s+(\d+(?:\.\d+)*)",
     re.IGNORECASE,
 )
+CODE_VOLUME_HEADING_MAX = 220
+RE_STRICT_CHAPTER = re.compile(r"^Глава\s+(\d+(?:\.\d+)*)\.\s+\S")
+RE_STRICT_SECTION = re.compile(r"^Раздел\s+([IVXLCDM\d]+)\.\s+\S")
+RE_STRICT_SUBSECTION = re.compile(r"^Подраздел\s+\S")
+RE_STRICT_PARAGRAPH = re.compile(r"^§\s*(\d+(?:\.\d+)*)\.\s+\S")
 
 
 @dataclass
@@ -97,6 +102,7 @@ class ArticleHeadingState:
     false_forward_spurious: tuple[int, ...] | None = None
     allow_large_forward: bool = False
     chapter_article_prefix: tuple[int, ...] | None = None
+    saw_substantive_body: bool = False
 
 
 @dataclass
@@ -109,6 +115,7 @@ class StructureLineState:
     preserve_page_break: bool = False
     heading: ArticleHeadingState = field(default_factory=ArticleHeadingState)
     prev_was_structure_heading: bool = False
+    prev_list_style: str | None = None
 
 
 def detect_lowercase_heading_style(text: str) -> bool:
@@ -139,8 +146,37 @@ def is_repealed_range_heading_line(s: str) -> bool:
     return not is_repealed_article_heading(s)
 
 
+def is_strict_code_chapter_heading(s: str) -> bool:
+    s = s.strip()
+    return len(s) <= CODE_VOLUME_HEADING_MAX and bool(RE_STRICT_CHAPTER.match(s))
+
+
+def is_strict_code_section_heading(s: str) -> bool:
+    s = s.strip()
+    return len(s) <= CODE_VOLUME_HEADING_MAX and bool(RE_STRICT_SECTION.match(s))
+
+
+def is_strict_code_subsection_heading(s: str) -> bool:
+    s = s.strip()
+    return len(s) <= CODE_VOLUME_HEADING_MAX and bool(RE_STRICT_SUBSECTION.match(s))
+
+
+def is_strict_code_paragraph_heading(s: str) -> bool:
+    s = s.strip()
+    return len(s) <= CODE_VOLUME_HEADING_MAX and bool(RE_STRICT_PARAGRAPH.match(s))
+
+
+def is_strict_code_volume_heading(s: str) -> bool:
+    return (
+        is_strict_code_chapter_heading(s)
+        or is_strict_code_section_heading(s)
+        or is_strict_code_subsection_heading(s)
+        or is_strict_code_paragraph_heading(s)
+    )
+
+
 def chapter_heading_article_prefix(s: str) -> tuple[int, ...] | None:
-    m = RE_CHAPTER_NUMBER.match(s.strip())
+    m = RE_STRICT_CHAPTER.match(s.strip())
     if not m:
         return None
     return article_number_tuple(m.group(1))
@@ -225,27 +261,23 @@ def is_structure_heading_line(s: str) -> bool:
     s = s.strip()
     return bool(
         is_article_heading_line(s)
-        or RE_CHAPTER_HEADING.match(s)
-        or RE_SUBSECTION_HEADING.match(s)
-        or RE_PARAGRAPH_SECTION.match(s)
+        or is_strict_code_volume_heading(s)
+        or re.match(r"^(?:Часть|ЧАСТЬ)\s+\S", s, re.IGNORECASE)
     )
 
 
 def is_code_structure_boundary_line(s: str) -> bool:
     """Граница блока в кодексе: глава / § / раздел (не склеивать в normalize)."""
     s = s.strip()
-    return bool(
-        RE_CHAPTER_HEADING.match(s)
-        or RE_SUBSECTION_HEADING.match(s)
-        or RE_PARAGRAPH_SECTION.match(s)
-        or re.match(r"^(?:Раздел|РАЗДЕЛ)\s", s, re.IGNORECASE)
-    )
+    return is_strict_code_volume_heading(s)
 
 
 def is_running_header_line(s: str, *, repeated: bool = False) -> bool:
     s = s.strip()
     if not s or s.startswith("<!--") or len(s) > BANNER_MAX_LEN:
         return False
+    if repeated and is_strict_code_volume_heading(s):
+        return True
     if RE_GOST_NUMBERED_SECTION.match(s):
         return False
     if (
@@ -381,24 +413,48 @@ def _heading_article_num(s: str) -> tuple[int, ...] | None:
     return article_number_tuple(m.group(1))
 
 
-def update_toc_state(line_state: StructureLineState, line: str) -> None:
+def update_toc_state(
+    line_state: StructureLineState,
+    line: str,
+    *,
+    skip_volume_reset: bool = False,
+) -> None:
     """TOC = 2+ подряд заголовков без тела; тело — рестарт N ≤ last (P2/Q4)."""
     s = line.strip()
     hs = line_state.heading
+    if line_state.after_page_break:
+        hs.in_toc_run = False
+        hs.after_toc_restart = True
+        if not is_strict_code_chapter_heading(s):
+            _reset_article_numbering(hs)
+            hs.chapter_article_prefix = None
     if is_paren_boundary_line(s):
         return
-    if RE_CHAPTER_HEADING.match(s):
-        if not hs.in_toc_run:
+    if is_strict_code_chapter_heading(s) and not skip_volume_reset:
+        if (
+            not hs.in_toc_run
+            or hs.last_article is not None
+            or hs.after_toc_restart
+            or line_state.after_page_break
+        ):
             _begin_chapter_heading(hs, s)
         if not hs.in_toc_run:
             hs.consecutive_heading_lines = 0
         return
     if (
-        RE_SUBSECTION_HEADING.match(s)
-        or RE_PARAGRAPH_SECTION.match(s)
-        or re.match(r"^(?:Раздел|РАЗДЕЛ)\s", s, re.IGNORECASE)
+        not skip_volume_reset
+        and (
+            is_strict_code_section_heading(s)
+            or is_strict_code_subsection_heading(s)
+            or is_strict_code_paragraph_heading(s)
+        )
     ):
-        if not hs.in_toc_run:
+        if (
+            not hs.in_toc_run
+            or hs.last_article is not None
+            or hs.after_toc_restart
+            or line_state.after_page_break
+        ):
             _begin_code_section_heading(hs)
         if not hs.in_toc_run:
             hs.consecutive_heading_lines = 0
@@ -424,6 +480,8 @@ def update_toc_state(line_state: StructureLineState, line: str) -> None:
                 hs.in_toc_run = True
         return
     if is_substantive_body_line(s):
+        if not hs.in_toc_run:
+            hs.saw_substantive_body = True
         if hs.in_toc_run:
             hs.after_toc_restart = True
             hs.in_toc_run = False
@@ -626,6 +684,23 @@ def accept_code_point_line(
     if not point_body_starts_ok(rest, prev):
         return None, None
     prev_r = prev.rstrip()
+    if kind == "subpoint":
+        if is_article_heading_line(prev_r):
+            line_state.prev_list_style = "paren_point"
+            return pid, "point"
+        if line_state.prev_list_style == "dot_point":
+            line_state.prev_list_style = "paren_sub"
+            return pid, kind
+        if line_state.prev_list_style == "paren_point":
+            prev_sub = RE_SUBPOINT_LINE.match(prev_r)
+            if (
+                prev_sub
+                and prev_sub.group(1).isdigit()
+                and pid.isdigit()
+                and int(pid) == int(prev_sub.group(1)) + 1
+            ):
+                line_state.prev_list_style = "paren_point"
+                return pid, "point"
     if line_state.prev_was_structure_heading:
         return pid, kind
     if RE_POINT_LINE.match(prev_r):

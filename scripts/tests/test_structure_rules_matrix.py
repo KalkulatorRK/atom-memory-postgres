@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -800,6 +801,55 @@ CASES: list[RulesCase] = [
             ("29.1.2", "1", None),
         ],
     ),
+    RulesCase(
+        "P_chreset_c3_body_glava",
+        [
+            "НК РФ ч. 1",
+            "Глава 14. НАЛОГОВЫЙ КОНТРОЛЬ",
+            "Статья 83. Учет",
+            "1. Текст статьи восемьдесят три достаточной длины для quality gate filter test.",
+            "Глава 15 настоящего Кодекса применяется с учетом положений настоящей статьи.",
+            "2. Текст части второй статьи восемьдесят три достаточной длины для quality gate filter.",
+            "Статья 84. Следующая",
+            "1. Текст статьи восемьдесят четыре достаточной длины для quality gate filter test.",
+        ],
+        "code",
+        "chreset_c3.pdf",
+        [("83", "1", None), ("83", "2", None), ("84", "1", None)],
+    ),
+    RulesCase(
+        "P_chreset_c5_fz_vved",
+        [
+            "118-ФЗ о введении НК ч. 2",
+            "Статья 2. Сроки",
+            "1. Текст части первой статьи два достаточной длины для quality gate filter test case.",
+            "Глава 21 \"Налог на добавленную стоимость\" части второй Кодекса вводится в действие с 1 января 2001 года.",
+            "2. Текст части второй статьи два достаточной длины для quality gate filter test case here.",
+            "Статья 3. Следующая",
+            "1. Текст статьи три достаточной длины для quality gate filter test case here now.",
+        ],
+        "code",
+        "chreset_c5.pdf",
+        [("2", "1", None), ("2", "2", None), ("3", "1", None)],
+    ),
+    RulesCase(
+        "P_chreset_c8_lowercase_razdel",
+        [],
+        "code",
+        "chreset_c8.pdf",
+        [("4", "1", None), ("4", "2", None), ("5", "1", None)],
+        md_text=(
+            "44-ФЗ о закупках\n\n"
+            "Статья 4. Положения\n\n"
+            "1. Текст части первой статьи четыре достаточной длины для quality gate filter test.\n\n"
+            "раздел II Положения о закупке применяется с учетом требований настоящей статьи.\n\n"
+            "Статья 2 настоящего Федерального закона не применяется к закупкам, "
+            "указанным в настоящей статьи.\n\n"
+            "2. Текст части второй статьи четыре достаточной длины для quality gate filter test case.\n\n"
+            "Статья 5. Дальше\n\n"
+            "1. Текст статьи пять достаточной длины для quality gate filter test case here."
+        ),
+    ),
 ]
 
 
@@ -827,6 +877,40 @@ class HeadingRulesMatrixTests(unittest.TestCase):
                     _assert_structure(atoms, case.expected, case_id=case.case_id)
                 if case.extra:
                     case.extra(ctx, atoms)
+
+    def test_chreset_harness_markers(self):
+        """probe_chreset c1–c18 (gen_mk5/mk6) — офлайн метки."""
+        harness = os.environ.get("PR3_CORPUS")
+        if not harness:
+            base = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tmp", "pr3-harness-v3", "pr3-corpus")
+            if os.path.isdir(os.path.join(base, "probe_chreset")):
+                harness = base
+        if not harness or not os.path.isdir(os.path.join(harness, "probe_chreset")):
+            self.skipTest("PR3_CORPUS / probe_chreset not available")
+        import subprocess
+
+        gen5 = os.path.join(harness, "probe_chreset", "gen_mk5.py")
+        gen6 = os.path.join(harness, "probe_chreset", "gen_mk6.py")
+        for g in (gen5, gen6):
+            if os.path.isfile(g):
+                src = open(g, encoding="utf-8").read().replace(
+                    "/workspace/repos/pr3-corpus", harness
+                )
+                exec(compile(src, g, "exec"), {"__name__": "__main__"})
+        scripts = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        proc = subprocess.run(
+            ["python3", os.path.join(harness, "chk.py"), scripts],
+            env={**os.environ, "CORPUS_DIRS": "probe_chreset"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        m = re.search(r"TOTAL ok=(\d+)/(\d+)", proc.stdout)
+        self.assertIsNotNone(m, proc.stdout)
+        ok, tot = int(m.group(1)), int(m.group(2))
+        self.assertEqual(ok, tot, proc.stdout)
+        self.assertGreaterEqual(tot, 173, proc.stdout)
 
     def test_r6_header_dates(self):
         text = (

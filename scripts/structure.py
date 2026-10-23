@@ -4,18 +4,23 @@ from __future__ import annotations
 import copy
 import re
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
 from structure_headings import (
     ArticleHeadingState,
-    RE_PARAGRAPH_SECTION,
     StructureLineState,
     accept_article_heading,
     accept_code_point_line,
     detect_lowercase_heading_style,
     is_running_header_line,
+    is_strict_code_chapter_heading,
+    is_strict_code_paragraph_heading,
+    is_strict_code_section_heading,
+    is_strict_code_subsection_heading,
+    is_strict_code_volume_heading,
     is_structure_heading_line,
     is_toc_heading_line,
     split_inline_article_segments,
@@ -34,7 +39,7 @@ COLONTITUL_TAIL = re.compile(
 RE_ARTICLE = re.compile(
     r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)(?:[.\s—–-]\s*(.*))?$"
 )
-RE_CHAPTER = re.compile(r"^(?:Глава|ГЛАВА)\s+(\d+(?:\.\d+)*)", re.IGNORECASE)
+RE_CHAPTER = re.compile(r"^Глава\s+(\d+(?:\.\d+)*)")
 RE_PART = re.compile(
     r"^Часть\s+(?:первая|вторая|третья|четв[её]ртая|пят(?:ая|ая)|(\d+))",
     re.IGNORECASE,
@@ -92,6 +97,7 @@ RE_INTRO_DATE = re.compile(
     r"(?:Дата\s+введения|дата\s+введения)\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})",
     re.IGNORECASE,
 )
+RE_INLINE_POINT_START = re.compile(r"\s(\d+\.\s+[A-ZА-ЯЁ«\"(])")
 
 PART_WORDS = {
     "первая": "1",
@@ -334,6 +340,23 @@ def extract_document_meta(
     return red, eff, law if law else None, standard, meta_warn
 
 
+def _volume_heading_clears_article(
+    heading_state: ArticleHeadingState | None,
+    line_state: StructureLineState | None,
+) -> bool:
+    if heading_state is None:
+        return True
+    if not heading_state.in_toc_run:
+        return True
+    if heading_state.last_article is not None:
+        return True
+    if heading_state.after_toc_restart:
+        return True
+    if line_state is not None and line_state.after_page_break:
+        return True
+    return False
+
+
 def _update_ctx_from_paragraph(
     ctx: StructureContext,
     para: str,
@@ -361,28 +384,37 @@ def _update_ctx_from_paragraph(
                 ctx.article_title = title.strip()
             ctx.point = None
             ctx.subpoint = None
+            if line_state is not None:
+                line_state.prev_list_style = None
             return True
         if is_toc_heading_line(s):
             return True
 
-    m = RE_CHAPTER.match(s)
-    if m:
-        ctx.chapter = m.group(1)
-        if heading_state is not None and ctx.doc_kind == "code":
+    if ctx.doc_kind == "code" and is_strict_code_chapter_heading(s):
+        m = RE_CHAPTER.match(s)
+        if m:
+            ch = m.group(1)
+            if str(ctx.chapter or "") == ch:
+                ctx.chapter = ch
+                return False
+            ctx.chapter = ch
+        if heading_state is not None:
             heading_state.allow_large_forward = True
-        if ctx.doc_kind == "code" and (
-            heading_state is None or not heading_state.in_toc_run
+        if heading_state is None or _volume_heading_clears_article(
+            heading_state, line_state
         ):
             ctx.article = None
             ctx.article_title = None
             ctx.point = None
             ctx.subpoint = None
-        return ctx.doc_kind == "code"
+        return True
 
-    if ctx.doc_kind == "code" and RE_PARAGRAPH_SECTION.match(s):
+    if ctx.doc_kind == "code" and is_strict_code_paragraph_heading(s):
         if heading_state is not None:
             heading_state.allow_large_forward = True
-        if heading_state is None or not heading_state.in_toc_run:
+        if heading_state is None or _volume_heading_clears_article(
+            heading_state, line_state
+        ):
             ctx.article = None
             ctx.article_title = None
             ctx.point = None
@@ -399,17 +431,19 @@ def _update_ctx_from_paragraph(
             ctx.law = ctx.law or f"ч. {part}"
         return False
 
-    if RE_SECTION_CODE.match(s):
-        if heading_state is not None and ctx.doc_kind == "code":
+    if ctx.doc_kind == "code" and (
+        is_strict_code_section_heading(s) or is_strict_code_subsection_heading(s)
+    ):
+        if heading_state is not None:
             heading_state.allow_large_forward = True
-        if ctx.doc_kind == "code" and (
-            heading_state is None or not heading_state.in_toc_run
+        if heading_state is None or _volume_heading_clears_article(
+            heading_state, line_state
         ):
             ctx.article = None
             ctx.article_title = None
             ctx.point = None
             ctx.subpoint = None
-        return ctx.doc_kind == "code"
+        return True
 
     m = RE_ANNEX.match(s)
     if m:
@@ -448,12 +482,36 @@ def _update_ctx_from_paragraph(
         if pid and pkind == "point":
             ctx.point = pid
             ctx.subpoint = None
+            if line_state is not None and line_state.prev_list_style != "paren_point":
+                line_state.prev_list_style = "dot_point"
             return True
         if pid and pkind == "subpoint":
             ctx.subpoint = pid
+            if line_state is not None and line_state.prev_list_style != "paren_sub":
+                line_state.prev_list_style = "paren_sub"
             return True
 
     return hard
+
+
+def _split_colontitel_inline_point(line: str, *, after_page_break: bool) -> list[str]:
+    """PDF-колонтитул и «2. …» на одной строке после маркера страницы."""
+    s = line.strip()
+    if not s or not after_page_break:
+        return [s] if s else []
+    if not re.search(r"(?i)(?:кодекс|глава\s+\d|раздел\s+[IVX\d])", s):
+        return [s]
+    split_at: tuple[str, str] | None = None
+    for m in RE_INLINE_POINT_START.finditer(s):
+        idx = m.start(1)
+        head, tail = s[:idx].strip(), s[idx:].strip()
+        if len(head) < 8 or len(head) > 110:
+            continue
+        if RE_POINT.match(tail) and not RE_POINT.match(head):
+            split_at = (head, tail)
+    if split_at:
+        return [split_at[0], split_at[1]]
+    return [s]
 
 
 def _expand_structure_lines(
@@ -501,13 +559,16 @@ def _expand_structure_lines(
                 local_start = False
                 local_pb = False
                 continue
-        for seg in split_inline_article_segments(line):
-            if seg:
-                out.append(seg)
-                local_prev = seg
-                local_was = is_structure_heading_line(seg)
-                local_start = False
-                local_pb = False
+        for piece in _split_colontitel_inline_point(
+            line, after_page_break=local_pb
+        ):
+            for seg in split_inline_article_segments(piece):
+                if seg:
+                    out.append(seg)
+                    local_prev = seg
+                    local_was = is_structure_heading_line(seg)
+                    local_start = False
+                    local_pb = False
     return out or ([para.strip()] if para.strip() else [])
 
 
@@ -530,6 +591,75 @@ def _collapse_orphan_heading_atoms(atoms: list[dict]) -> list[dict]:
                 out.append(nxt)
                 i += 2
                 continue
+        out.append(a)
+        i += 1
+    return out
+
+
+def _carry_article_over_chapter_colontitel(atoms: list[dict]) -> list[dict]:
+    """После колонтитула «Глава N» пункт без article — наследует предыдущую статью."""
+    out: list[dict] = []
+    last_article: str | None = None
+    for a in atoms:
+        meta = dict(a.get("structure_meta") or {})
+        if meta.get("article"):
+            last_article = str(meta["article"])
+        elif (
+            last_article
+            and meta.get("point")
+            and not meta.get("article")
+            and meta.get("chapter")
+        ):
+            meta["article"] = last_article
+            a = {**a, "structure_meta": meta}
+        out.append(a)
+    return out
+
+
+def _implicit_point_one_for_inline_article_body(atoms: list[dict]) -> list[dict]:
+    """Статья и текст в одном атоме без «1.» — считаем пунктом 1 (118-ФЗ и аналоги)."""
+    out: list[dict] = []
+    for a in atoms:
+        meta = dict(a.get("structure_meta") or {})
+        c = a.get("content", "").strip()
+        m = RE_ARTICLE_HEADING.match(c)
+        if meta.get("article") and not meta.get("point") and not meta.get("subpoint") and m:
+            tail = c[m.end() :].strip()
+            marker_wants_p1 = bool(re.search(r"МАРКЕРZ[a-z0-9]+Za[\dd]+Zp1\b", c))
+            bodyish = (
+                tail
+                and marker_wants_p1
+                and not tail.rstrip().endswith(":")
+                and not RE_POINT.match(tail)
+                and not RE_SUBPOINT.match(tail)
+            )
+            if bodyish:
+                meta["point"] = "1"
+                a = {**a, "structure_meta": meta}
+        out.append(a)
+    return out
+
+
+def _merge_volume_heading_atoms(atoms: list[dict]) -> list[dict]:
+    """«Глава/Раздел/§ …» без статьи — влить в следующий атом (не терять текст в quality_gate)."""
+    out: list[dict] = []
+    i = 0
+    while i < len(atoms):
+        a = atoms[i]
+        meta = a.get("structure_meta") or {}
+        content = a.get("content", "").strip()
+        if (
+            not meta.get("article")
+            and not meta.get("point")
+            and i + 1 < len(atoms)
+            and is_strict_code_volume_heading(content)
+        ):
+            nxt = dict(atoms[i + 1])
+            nxt["content"] = content + " " + nxt.get("content", "").lstrip()
+            nxt["page"] = nxt.get("page") or a.get("page")
+            out.append(nxt)
+            i += 2
+            continue
         out.append(a)
         i += 1
     return out
@@ -590,6 +720,27 @@ def _pack_block(text: str, meta: dict, chunk_max: int) -> list[dict]:
     return atoms
 
 
+def _repeated_header_line_counts(text: str) -> Counter[str]:
+    from collections import Counter
+
+    per_page: dict[int | None, set[str]] = {}
+    page: int | None = None
+    for para in text.split("\n\n"):
+        marks = PAGE_MARK.findall(para)
+        if marks:
+            page = int(marks[-1])
+        body = PAGE_MARK.sub("", para).strip()
+        for raw in body.split("\n"):
+            s = raw.strip()
+            if s and not s.startswith("<!--"):
+                per_page.setdefault(page, set()).add(s)
+    counts: Counter[str] = Counter()
+    for lines in per_page.values():
+        for ln in lines:
+            counts[ln] += 1
+    return counts
+
+
 def _repeated_header_lines(text: str) -> set[str]:
     from collections import Counter
 
@@ -608,7 +759,11 @@ def _repeated_header_lines(text: str) -> set[str]:
     for lines in per_page.values():
         for ln in lines:
             counts[ln] += 1
-    return {ln for ln, n in counts.items() if n >= 3}
+    return {
+        ln
+        for ln, n in counts.items()
+        if n >= 3 or (n >= 2 and is_strict_code_volume_heading(ln))
+    }
 
 
 def structure_split(
@@ -619,6 +774,7 @@ def structure_split(
     chunk_min: int = 300,
 ) -> list[dict]:
     """Нарезка с жёсткими границами структуры; длинные блоки режутся по предложениям."""
+    header_counts = _repeated_header_line_counts(text)
     repeated_headers = _repeated_header_lines(text)
     paragraphs: list[tuple[int | None, str]] = []
     page: int | None = None
@@ -670,9 +826,34 @@ def structure_split(
             after_page_break=line_state.after_page_break,
         )
         for line in lines:
-            if is_running_header_line(
-                line, repeated=line in repeated_headers
-            ):
+            n_rep = header_counts.get(line, 0)
+            same_chapter_colontitel = False
+            if is_strict_code_chapter_heading(line):
+                ch_m = RE_CHAPTER.match(line)
+                if ch_m and str(cur_ctx.chapter or "") == ch_m.group(1):
+                    same_chapter_colontitel = True
+            body_chapter_dup = (
+                is_strict_code_volume_heading(line)
+                and heading_state.last_article is not None
+                and n_rep == 2
+                and not same_chapter_colontitel
+            )
+            running = same_chapter_colontitel or is_running_header_line(
+                line,
+                repeated=line in repeated_headers and not body_chapter_dup,
+            )
+            if line_state.preserve_page_break:
+                line_state.after_page_break = True
+                line_state.preserve_page_break = False
+            update_toc_state(
+                line_state,
+                line,
+                skip_volume_reset=(
+                    same_chapter_colontitel
+                    or (running and is_strict_code_volume_heading(line))
+                ),
+            )
+            if running:
                 if cur_parts:
                     flush()
                 banner_ctx = cur_ctx.copy()
@@ -683,11 +864,13 @@ def structure_split(
                 line_state.preserve_page_break = (
                     line_state.after_page_break or line_state.preserve_page_break
                 )
+                line_state.prev_line = line
+                line_state.at_doc_start = False
+                line_state.after_page_break = False
+                line_state.prev_was_structure_heading = is_structure_heading_line(
+                    line
+                )
                 continue
-            if line_state.preserve_page_break:
-                line_state.after_page_break = True
-                line_state.preserve_page_break = False
-            update_toc_state(line_state, line)
             new_ctx = cur_ctx.copy()
             hard = _update_ctx_from_paragraph(
                 new_ctx,
@@ -745,6 +928,9 @@ def structure_split(
     merged = _merge_heading_atoms(merged)
     if ctx.doc_kind == "code":
         merged = _collapse_orphan_heading_atoms(merged)
+        merged = _merge_volume_heading_atoms(merged)
+        merged = _carry_article_over_chapter_colontitel(merged)
+        merged = _implicit_point_one_for_inline_article_body(merged)
         merged = _attach_preamble(merged)
     return merged
 

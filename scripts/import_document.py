@@ -386,7 +386,11 @@ def quality_gate(atoms):
         letters = re.findall(r'[А-Яа-яA-Za-z]', content)
         sm = a.get("structure_meta") or {}
         structured = bool(
-            sm.get("article") or sm.get("section_path") or sm.get("point") or sm.get("annex")
+            sm.get("article")
+            or sm.get("chapter")
+            or sm.get("section_path")
+            or sm.get("point")
+            or sm.get("annex")
         )
         min_len = 8 if structured else 30
         min_letters = 4 if structured else 10
@@ -869,7 +873,8 @@ def import_doc(
                 file=sys.stderr,
             )
 
-    return len(enriched), links
+    n_text = len(enriched)
+    return n_text, links
 
 
 if __name__ == "__main__":
