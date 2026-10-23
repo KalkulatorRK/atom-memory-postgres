@@ -4,20 +4,47 @@ from __future__ import annotations
 import re
 import sys
 
-_MEM = re.compile(r"^([0-9]+)\s*(KB|MB|GB|TB)$")
+# PostgreSQL: kB с маленькой k (не KB).
+_MEM = re.compile(r"^([0-9]+)\s*(kB|MB|GB|TB)$")
+
+# Диапазон maintenance_work_mem (в kB), ~128 GB верхняя граница для админ-скрипта.
+_MIN_KB = 64
+_MAX_KB = 128 * 1024 * 1024
+
+
+def _to_kb(n: int, unit: str) -> int:
+    if unit == "kB":
+        return n
+    if unit == "MB":
+        return n * 1024
+    if unit == "GB":
+        return n * 1024 * 1024
+    if unit == "TB":
+        return n * 1024 * 1024 * 1024
+    raise ValueError(unit)
 
 
 def normalize_mem(raw: str) -> str:
-    m = _MEM.match(raw.strip())
+    s = raw.strip()
+    if re.match(r"^[0-9]+\s*KB$", s):
+        raise ValueError(
+            "maintenance_work_mem: PostgreSQL принимает kB (маленькая k), не KB; "
+            "например 512kB, 128MB, 1GB"
+        )
+    m = _MEM.match(s)
     if not m:
         raise ValueError(
-            "maintenance_work_mem: нужен формат 128MB, 1GB, 512KB или 1TB "
-            "(заглавные KB/MB/GB/TB; без 1gb, 5, 1kB)"
+            "maintenance_work_mem: формат 64kB, 128MB, 1GB или 1TB "
+            "(kB/MB/GB/TB как в PostgreSQL; без 1gb, 5, 512KB)"
         )
     n = int(m.group(1))
-    if n < 1:
-        raise ValueError("maintenance_work_mem: число должно быть ≥ 1")
-    return f"{n}{m.group(2)}"
+    unit = m.group(2)
+    kb = _to_kb(n, unit)
+    if kb < _MIN_KB or kb > _MAX_KB:
+        raise ValueError(
+            f"maintenance_work_mem: вне диапазона {_MIN_KB}kB–{_MAX_KB // (1024 * 1024)}GB"
+        )
+    return f"{n}{unit}"
 
 
 def main(argv: list[str]) -> int:

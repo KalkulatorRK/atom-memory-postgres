@@ -3,6 +3,9 @@
 ## 1.9.1
 
 - **Fix:** `setup_memory_db.sh` без `ADMIN_DSN` снова создаёт роль через `admin_psql` + `render_role_password_sql.py` (stdlib), без psycopg2 от root.
+- **Security:** пароль роли — `format()`/`\gexec` без `DO $$` (инъекция psql `\!`); тесты `test_setup_role_security.py`.
+- **Security:** `vector_index_admin.sh` — единицы `kB`/MB/GB/TB и диапазон mem; DROP только после успешного SET в одном сеансе.
+- Третий аргумент пароля setup — deprecated; удалён неиспользуемый `set_db_role_password.py`.
 - `db_dsn.py`: DSN с query-string (`?sslmode=`) для admin/migration/vector_index.
 - `vector_index_admin.sh`: строгая проверка `--mem`/`--dims`; DROP только после валидации.
 - Зависимость `mcp>=1,<2`; migration-тесты в CI не skip при ошибке ADMIN_DSN; CI job setup без ADMIN_DSN.

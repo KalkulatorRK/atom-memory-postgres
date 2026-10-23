@@ -76,19 +76,22 @@ if [ -n "${ADMIN_DSN:-}" ]; then
 elif [ "$(id -un)" = "postgres" ]; then
   psql_admin() { psql -d "$1" "${@:2}"; }
 else
-  psql_admin() { sudo -u postgres psql -d "$1" "${@:2}"; }
+  psql_admin() { sudo -u postgres env PGHOST="${PGHOST:-}" PGPORT="${PGPORT:-}" psql -d "$1" "${@:2}"; }
 fi
 
 DB="${PGDATABASE:-memory}"
 
+# Один сеанс: SET (проверка mem) → опционально DROP → CREATE. ON_ERROR_STOP: неверный mem не удаляет индекс.
+DROP_SQL=""
 if [ "$DROP" -eq 1 ]; then
-  psql_admin "$DB" -v ON_ERROR_STOP=1 -c "DROP INDEX IF EXISTS public.\"$IDX\";"
+  DROP_SQL="DROP INDEX IF EXISTS public.\"$IDX\";"
 fi
 
 psql_admin "$DB" -v ON_ERROR_STOP=1 \
   -v model="$MODEL" -v dims="$DIMS" -v m="$M" -v efc="$EFC" -v idx="$IDX" <<SQL
 SET maintenance_work_mem = '${MEM}';
 SET max_parallel_maintenance_workers = ${MPW};
+${DROP_SQL}
 SELECT format(
   'CREATE INDEX CONCURRENTLY IF NOT EXISTS %I ON public.embeddings USING hnsw ((vector::public.vector(%s)) public.vector_cosine_ops) WITH (m = %s, ef_construction = %s) WHERE model = %L AND dims = %s',
   :'idx', :'dims', :'m', :'efc', :'model', :'dims'

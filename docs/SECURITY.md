@@ -4,14 +4,18 @@
 
 - Не коммитьте реальные пароли БД, `EMBED_API_KEY` и другие секреты в репозиторий.
 - Строка подключения `PG_DSN` храните в `~/.hermes/.env` или переменных окружения на сервере.
-- Установка БД: задайте пароль приложения через **`MEMORY_DB_PASSWORD`**, а не третьим аргументом в shell (чтобы не попадал в history):
+- Установка БД: задайте пароль приложения через **`MEMORY_DB_PASSWORD`** (предпочтительно), а не третьим аргументом скрипта (argv виден в `ps`).
 
 ```bash
 export MEMORY_DB_PASSWORD='ваш_секрет'
-sudo -E env SETUP_SKIP_INSTALL=1 bash scripts/setup_memory_db.sh memory hermes
+sudo -E bash scripts/setup_memory_db.sh memory hermes
 ```
 
-Пароль роли записывается через временный SQL-файл и `admin_psql` (суперпользователь), без `-v db_pass` в argv `psql`.
+`sudo -E` сохраняет переменные окружения только если это разрешено в sudoers (`env_keep` / `SETENV`). Иначе передайте пароль иным способом, согласованным с вашей политикой.
+
+Пароль роли записывается через **`format()` + `\gexec` в stdin psql** (без dollar-quoting и без пароля в argv `psql`).
+
+Третий аргумент `[db_password]` у `setup_memory_db.sh` **устарел** — при использовании выводится предупреждение.
 
 ### Ротация пароля
 

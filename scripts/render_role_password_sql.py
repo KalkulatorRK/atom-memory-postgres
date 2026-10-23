@@ -1,13 +1,28 @@
 #!/usr/bin/env python3
-"""SQL для CREATE/ALTER ROLE (stdlib). Пароль только из MEMORY_DB_PASSWORD, роль из DB_USER."""
+"""SQL для CREATE/ALTER ROLE: format()+\\gexec, без dollar-quoting (безопасно для psql -f -)."""
 from __future__ import annotations
 
 import os
 import sys
 
 
-def _sql_literal(value: str) -> str:
+def _pg_sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def render_role_password_sql(role: str, password: str) -> str:
+    r = _pg_sql_literal(role)
+    p = _pg_sql_literal(password)
+    return (
+        "SELECT format(\n"
+        "  CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = "
+        f"{r})\n"
+        "    THEN 'ALTER ROLE %I PASSWORD %L'\n"
+        "    ELSE 'CREATE ROLE %I LOGIN PASSWORD %L'\n"
+        "  END,\n"
+        f"  {r}, {p}\n"
+        ") \\gexec\n"
+    )
 
 
 def main() -> int:
@@ -19,19 +34,7 @@ def main() -> int:
     if not password:
         print("MEMORY_DB_PASSWORD не задан", file=sys.stderr)
         return 2
-    r = _sql_literal(role)
-    p = _sql_literal(password)
-    print(
-        f"""DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {r}) THEN
-    EXECUTE format('ALTER ROLE %I PASSWORD %L', {r}, {p});
-  ELSE
-    EXECUTE format('CREATE ROLE %I LOGIN PASSWORD %L', {r}, {p});
-  END IF;
-END $$;
-"""
-    )
+    sys.stdout.write(render_role_password_sql(role, password))
     return 0
 
 

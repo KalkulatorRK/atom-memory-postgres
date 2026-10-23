@@ -8,13 +8,14 @@ DB_NAME="${1:-memory}"
 DB_USER="${2:-hermes}"
 DB_PASS="${3:-}"
 
-if [ -z "$DB_PASS" ]; then
-    if [ -n "${MEMORY_DB_PASSWORD:-}" ]; then
-        DB_PASS="$MEMORY_DB_PASSWORD"
-    else
-        echo "Использование: $0 [db_name] [db_user] [db_password]"
-        exit 1
-    fi
+if [ -n "$DB_PASS" ]; then
+    echo "Предупреждение: пароль в argv ($0 … [db_password]) виден в ps; используйте MEMORY_DB_PASSWORD." >&2
+elif [ -n "${MEMORY_DB_PASSWORD:-}" ]; then
+    DB_PASS="$MEMORY_DB_PASSWORD"
+else
+    echo "Использование: MEMORY_DB_PASSWORD=… $0 [db_name] [db_user]"
+    echo "  (устарело: третий аргумент [db_password] — только для совместимости)"
+    exit 1
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
