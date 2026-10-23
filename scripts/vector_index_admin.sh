@@ -43,6 +43,22 @@ if [ "$DIMS" -gt 2000 ] 2>/dev/null; then
   echo "dims > 2000: нужен halfvec (pgvector ≥ 0.7)"
   exit 1
 fi
+if ! [[ "$M" =~ ^[0-9]+$ ]] || [ "$M" -lt 2 ] || [ "$M" -gt 100 ]; then
+  echo "--m: целое от 2 до 100"
+  exit 1
+fi
+if ! [[ "$EFC" =~ ^[0-9]+$ ]] || [ "$EFC" -lt 4 ] || [ "$EFC" -gt 1000 ]; then
+  echo "--ef-construction: целое от 4 до 1000"
+  exit 1
+fi
+if ! [[ "$MEM" =~ ^[0-9]+[kKmMgG]?[bB]?$ ]]; then
+  echo "--mem: например 512MB, 1GB, 2048MB"
+  exit 1
+fi
+if ! [[ "$MPW" =~ ^[0-9]+$ ]]; then
+  echo "max_parallel_maintenance_workers: целое"
+  exit 1
+fi
 
 IDX=$(MODEL="$MODEL" DIMS="$DIMS" SCRIPT_DIR="$SCRIPT_DIR" python3 -c "
 import os, sys
@@ -67,14 +83,15 @@ if [ "$DROP" -eq 1 ]; then
   psql_admin "$DB" -v ON_ERROR_STOP=1 -c "DROP INDEX IF EXISTS public.\"$IDX\";"
 fi
 
-# CREATE INDEX CONCURRENTLY нельзя в одной транзакции с SET — отдельные вызовы psql.
-psql_admin "$DB" -v ON_ERROR_STOP=1 -c "SET maintenance_work_mem = '${MEM}';"
-psql_admin "$DB" -v ON_ERROR_STOP=1 -c "SET max_parallel_maintenance_workers = ${MPW};"
-psql_admin "$DB" -v ON_ERROR_STOP=1 -v model="$MODEL" -v dims="$DIMS" -v m="$M" -v efc="$EFC" -v idx="$IDX" <<'SQL'
+# Один сеанс psql: SET действует на CREATE INDEX CONCURRENTLY ниже (MEM/MPW проверены выше).
+psql_admin "$DB" -v ON_ERROR_STOP=1 \
+  -v model="$MODEL" -v dims="$DIMS" -v m="$M" -v efc="$EFC" -v idx="$IDX" <<SQL
+SET maintenance_work_mem = '${MEM}';
+SET max_parallel_maintenance_workers = ${MPW};
 SELECT format(
   'CREATE INDEX CONCURRENTLY IF NOT EXISTS %I ON public.embeddings USING hnsw ((vector::public.vector(%s)) public.vector_cosine_ops) WITH (m = %s, ef_construction = %s) WHERE model = %L AND dims = %s',
   :'idx', :'dims', :'m', :'efc', :'model', :'dims'
-) \gexec
+) \\gexec
 SQL
 
 echo "готово: $IDX"

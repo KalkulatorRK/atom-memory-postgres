@@ -17,6 +17,8 @@ if [ -z "$DB_PASS" ]; then
     fi
 fi
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 ident='^[a-zA-Z_][a-zA-Z0-9_]*$'
 if ! [[ "$DB_NAME" =~ $ident && "$DB_USER" =~ $ident ]]; then
     echo "Имя БД и пользователя: только латиница, цифры и подчёркивание."
@@ -77,15 +79,7 @@ echo "[3/4] Создание БД $DB_NAME и пользователя $DB_USER.
 if ! admin_psql postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
   admin_psql postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${DB_NAME}\""
 fi
-if ! admin_psql postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
-  admin_psql postgres -v ON_ERROR_STOP=1 -v db_user="$DB_USER" -v db_pass="$DB_PASS" <<'SQL'
-SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'db_user', :'db_pass') \gexec
-SQL
-else
-  admin_psql postgres -v ON_ERROR_STOP=1 -v db_user="$DB_USER" -v db_pass="$DB_PASS" <<'SQL'
-SELECT format('ALTER ROLE %I PASSWORD %L', :'db_user', :'db_pass') \gexec
-SQL
-fi
+MEMORY_DB_PASSWORD="$DB_PASS" python3 "$SCRIPT_DIR/set_db_role_password.py" "$DB_USER"
 admin_psql postgres -v ON_ERROR_STOP=1 \
   -v db_name="$DB_NAME" -v db_user="$DB_USER" <<'SQL'
 SELECT format('GRANT CONNECT, TEMPORARY ON DATABASE %I TO %I', :'db_name', :'db_user') \gexec
@@ -96,9 +90,12 @@ SELECT format('GRANT USAGE ON SCHEMA public TO %I', :'db_user') \gexec
 SQL
 
 echo "[4/4] Применение схемы..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA="$SCRIPT_DIR/../references/schema.sql"
-admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -f "$SCHEMA"
+if admin_psql "$DB_NAME" -tAc "SELECT to_regclass('public.atoms') IS NOT NULL" | grep -q t; then
+  echo "      База уже инициализирована — пропуск schema.sql (без потери данных)"
+else
+  admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -f "$SCHEMA"
+fi
 for MIGRATION in "$SCRIPT_DIR"/../references/migrations/*.sql; do
     [ -f "$MIGRATION" ] || continue
     case "$MIGRATION" in

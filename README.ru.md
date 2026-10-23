@@ -108,6 +108,10 @@ PDF → [1] разбор (pymupdf) → [2] таблицы/схемы целик�
 
 Поиск: гибрид FTS + ILIKE + вектор (RRF) → связанные атомы. Backfill: `python3 scripts/embed_atoms.py --dry-run` (оценка), затем без `--dry-run`.
 
+Порог `EMBED_MIN_SIM` по умолчанию **консервативен** (0.72 для облака). Ориентир без сети: `python3 scripts/calibrate_min_sim.py` (fake); точная подстройка — `scripts/eval_search.py` на ваших запросах.
+
+Повторный `setup_memory_db.sh` на существующей БД безопасен: `schema.sql` пропускается, применяются только миграции. Секреты и ротация пароля: [`docs/SECURITY.md`](docs/SECURITY.md).
+
 ### Приватность эмбеддингов
 
 Облачный провайдер получает тексты атомов (backfill/импорт) и **текст поискового запроса** в режимах `hybrid`/`vector`. Ключ — только `EMBED_API_KEY`. Для чувствительных проектов: `python3 scripts/embed_atoms.py --set-policy my-project local_only` или `none`. Loopback `EMBED_BASE_URL` (vLLM/Ollama на localhost) не считается внешней отправкой.

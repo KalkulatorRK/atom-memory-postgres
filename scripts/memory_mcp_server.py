@@ -29,9 +29,25 @@ def search_atoms(query: str, project: str = "", limit: int = 5, mode: str = "hyb
     return [hit_to_dict(h) for h in sr.results], sr.warnings
 
 
-def format_memory_search_response(res: list, warnings: list[str]) -> str:
-    """JSON-RPC text: массив хитов как в v1.8; объект с warnings — только если они есть."""
-    if warnings:
+def mcp_include_warnings(explicit: bool | None = None) -> bool:
+    """Opt-in: объект с warnings вместо массива (совместимость 1.8 по умолчанию)."""
+    if explicit is not None:
+        return explicit
+    return os.environ.get("ATOM_MEMORY_MCP_INCLUDE_WARNINGS", "").strip() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def format_memory_search_response(
+    res: list,
+    warnings: list[str],
+    *,
+    include_warnings: bool = False,
+) -> str:
+    """JSON-RPC text: по умолчанию массив хитов как в v1.8."""
+    if include_warnings and warnings:
         payload: dict = {"results": res, "warnings": warnings}
         if not res:
             payload["message"] = "ничего не найдено"
@@ -193,6 +209,11 @@ def _fallback_loop():
                                             "enum": ["fts", "vector", "hybrid"],
                                             "default": "hybrid",
                                         },
+                                        "include_warnings": {
+                                            "type": "boolean",
+                                            "default": False,
+                                            "description": "если true — JSON-объект с warnings вместо массива",
+                                        },
                                     },
                                 },
                             }
@@ -221,10 +242,26 @@ def _fallback_loop():
                             },
                         )
                         continue
+                    inc_w = args.get("include_warnings")
+                    if inc_w is not None and not isinstance(inc_w, bool):
+                        _reply(
+                            rid,
+                            error={
+                                "code": -32602,
+                                "message": "Invalid params: include_warnings",
+                            },
+                        )
+                        continue
                     res, warnings = search_atoms(
                         args.get("query", ""), args.get("project", ""), limit, mode
                     )
-                    text = format_memory_search_response(res, warnings)
+                    include_w = mcp_include_warnings(inc_w)
+                    if warnings and not include_w:
+                        for w in warnings:
+                            sys.stderr.write(f"memory_search: {w}\n")
+                    text = format_memory_search_response(
+                        res, warnings, include_warnings=include_w
+                    )
                     _reply(rid, result={"content": [{"type": "text", "text": text}]})
                 else:
                     _reply(rid, error={"code": -32602, "message": f"Unknown tool: {name}"})
@@ -255,17 +292,31 @@ def main():
 
         @mcp.tool()
         def memory_search(
-            query: str, project: str = "", limit: int = 5, mode: str = "hybrid"
+            query: str,
+            project: str = "",
+            limit: int = 5,
+            mode: str = "hybrid",
+            include_warnings: bool = False,
         ) -> str:
-            """Поиск по атомной базе знаний. mode: fts | vector | hybrid (по умолчанию hybrid)."""
+            """Поиск по атомной базе знаний (FTS, вектор или гибрид).
+
+            query — текст запроса; project — имя проекта или пусто для всех;
+            limit — число результатов (до 10); mode — fts | vector | hybrid;
+            include_warnings — если True, вернуть JSON с полем warnings (иначе текст/массив как раньше).
+            """
             try:
                 res, warnings = search_atoms(query, project, min(limit, 10), mode)
+                if include_warnings:
+                    return format_memory_search_response(
+                        res, warnings, include_warnings=True
+                    )
                 return _format_search_results(res, warnings)
             except Exception as e:
                 return f"Ошибка поиска: {e}"
 
         @mcp.tool()
         def memory_sources() -> str:
+            """Список источников в базе: название, проект, версия, число атомов, префикс sha256."""
             try:
                 rows = list_sources()
                 if not rows:
@@ -279,6 +330,7 @@ def main():
 
         @mcp.tool()
         def memory_stats() -> str:
+            """Сводка БД: число атомов, связей, версий, размер, pgvector, провайдер эмбеддингов и покрытие векторами."""
             try:
                 s = stats()
                 lines = [
