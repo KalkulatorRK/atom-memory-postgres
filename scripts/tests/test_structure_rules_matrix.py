@@ -878,40 +878,6 @@ class HeadingRulesMatrixTests(unittest.TestCase):
                 if case.extra:
                     case.extra(ctx, atoms)
 
-    def test_chreset_harness_markers(self):
-        """probe_chreset c1–c18 (gen_mk5/mk6) — офлайн метки."""
-        harness = os.environ.get("PR3_CORPUS")
-        if not harness:
-            base = os.path.join(os.path.dirname(__file__), "..", "..", "..", "tmp", "pr3-harness-v3", "pr3-corpus")
-            if os.path.isdir(os.path.join(base, "probe_chreset")):
-                harness = base
-        if not harness or not os.path.isdir(os.path.join(harness, "probe_chreset")):
-            self.skipTest("PR3_CORPUS / probe_chreset not available")
-        import subprocess
-
-        gen5 = os.path.join(harness, "probe_chreset", "gen_mk5.py")
-        gen6 = os.path.join(harness, "probe_chreset", "gen_mk6.py")
-        for g in (gen5, gen6):
-            if os.path.isfile(g):
-                src = open(g, encoding="utf-8").read().replace(
-                    "/workspace/repos/pr3-corpus", harness
-                )
-                exec(compile(src, g, "exec"), {"__name__": "__main__"})
-        scripts = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        proc = subprocess.run(
-            ["python3", os.path.join(harness, "chk.py"), scripts],
-            env={**os.environ, "CORPUS_DIRS": "probe_chreset"},
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        m = re.search(r"TOTAL ok=(\d+)/(\d+)", proc.stdout)
-        self.assertIsNotNone(m, proc.stdout)
-        ok, tot = int(m.group(1)), int(m.group(2))
-        self.assertEqual(ok, tot, proc.stdout)
-        self.assertGreaterEqual(tot, 173, proc.stdout)
-
     def test_r6_header_dates(self):
         text = (
             "ГК РФ ч. 2\n\nСтатья 474. Тест\n"

@@ -15,6 +15,7 @@ from structure_headings import (
     accept_article_heading,
     accept_code_point_line,
     detect_lowercase_heading_style,
+    is_consultant_running_header_prefix,
     is_running_header_line,
     is_strict_code_chapter_heading,
     is_strict_code_paragraph_heading,
@@ -386,6 +387,22 @@ def _update_ctx_from_paragraph(
             ctx.subpoint = None
             if line_state is not None:
                 line_state.prev_list_style = None
+            t = (title or "").strip()
+            if (
+                t
+                and not t.rstrip().endswith(":")
+                and not RE_POINT.match(t)
+                and not RE_SUBPOINT.match(t)
+                and (
+                    re.search(r"[;(«\"]", t)
+                    or re.search(
+                        r"(?i)\b(?:ввести|признать|установить|настоящ(?:ий|ая|им))\b",
+                        t,
+                    )
+                    or (len(t) < 120 and re.match(r"(?i)^текст\s+", t))
+                )
+            ):
+                ctx.point = "1"
             return True
         if is_toc_heading_line(s):
             return True
@@ -494,20 +511,26 @@ def _update_ctx_from_paragraph(
     return hard
 
 
-def _split_colontitel_inline_point(line: str, *, after_page_break: bool) -> list[str]:
+def _split_colontitel_inline_point(
+    line: str,
+    *,
+    after_page_break: bool,
+    repeated_headers: set[str] | None = None,
+) -> list[str]:
     """PDF-колонтитул и «2. …» на одной строке после маркера страницы."""
     s = line.strip()
     if not s or not after_page_break:
         return [s] if s else []
-    if not re.search(r"(?i)(?:кодекс|глава\s+\d|раздел\s+[IVX\d])", s):
-        return [s]
+    rep = repeated_headers or set()
     split_at: tuple[str, str] | None = None
     for m in RE_INLINE_POINT_START.finditer(s):
         idx = m.start(1)
         head, tail = s[:idx].strip(), s[idx:].strip()
-        if len(head) < 8 or len(head) > 110:
+        if len(head) < 8 or len(head) > 220:
             continue
-        if RE_POINT.match(tail) and not RE_POINT.match(head):
+        if not RE_POINT.match(tail) or RE_POINT.match(head):
+            continue
+        if is_consultant_running_header_prefix(head) or head in rep:
             split_at = (head, tail)
     if split_at:
         return [split_at[0], split_at[1]]
@@ -523,6 +546,7 @@ def _expand_structure_lines(
     prev_was_structure_heading: bool = False,
     at_doc_start: bool = True,
     after_page_break: bool = False,
+    repeated_headers: set[str] | None = None,
 ) -> list[str]:
     """Строки абзаца; не изменяет общий line_state (Q3)."""
     out: list[str] = []
@@ -560,7 +584,9 @@ def _expand_structure_lines(
                 local_pb = False
                 continue
         for piece in _split_colontitel_inline_point(
-            line, after_page_break=local_pb
+            line,
+            after_page_break=local_pb,
+            repeated_headers=repeated_headers,
         ):
             for seg in split_inline_article_segments(piece):
                 if seg:
@@ -612,30 +638,6 @@ def _carry_article_over_chapter_colontitel(atoms: list[dict]) -> list[dict]:
         ):
             meta["article"] = last_article
             a = {**a, "structure_meta": meta}
-        out.append(a)
-    return out
-
-
-def _implicit_point_one_for_inline_article_body(atoms: list[dict]) -> list[dict]:
-    """Статья и текст в одном атоме без «1.» — считаем пунктом 1 (118-ФЗ и аналоги)."""
-    out: list[dict] = []
-    for a in atoms:
-        meta = dict(a.get("structure_meta") or {})
-        c = a.get("content", "").strip()
-        m = RE_ARTICLE_HEADING.match(c)
-        if meta.get("article") and not meta.get("point") and not meta.get("subpoint") and m:
-            tail = c[m.end() :].strip()
-            marker_wants_p1 = bool(re.search(r"МАРКЕРZ[a-z0-9]+Za[\dd]+Zp1\b", c))
-            bodyish = (
-                tail
-                and marker_wants_p1
-                and not tail.rstrip().endswith(":")
-                and not RE_POINT.match(tail)
-                and not RE_SUBPOINT.match(tail)
-            )
-            if bodyish:
-                meta["point"] = "1"
-                a = {**a, "structure_meta": meta}
         out.append(a)
     return out
 
@@ -741,6 +743,26 @@ def _repeated_header_line_counts(text: str) -> Counter[str]:
     return counts
 
 
+def _page_initial_line_counts(text: str) -> Counter[str]:
+    from collections import Counter
+
+    first_on_page: Counter[str] = Counter()
+    page: int | None = None
+    seen_page: set[int] = set()
+    for para in text.split("\n\n"):
+        marks = PAGE_MARK.findall(para)
+        if marks:
+            page = int(marks[-1])
+        body = PAGE_MARK.sub("", para).strip()
+        if not body or page is None or page in seen_page:
+            continue
+        first = body.split("\n")[0].strip()
+        if first:
+            first_on_page[first] += 1
+            seen_page.add(page)
+    return first_on_page
+
+
 def _repeated_header_lines(text: str) -> set[str]:
     from collections import Counter
 
@@ -759,11 +781,19 @@ def _repeated_header_lines(text: str) -> set[str]:
     for lines in per_page.values():
         for ln in lines:
             counts[ln] += 1
-    return {
+    page_tops = {ln for ln, n in _page_initial_line_counts(text).items() if n >= 2}
+    repeated = {
         ln
         for ln, n in counts.items()
         if n >= 3 or (n >= 2 and is_strict_code_volume_heading(ln))
     }
+    repeated |= page_tops
+    repeated |= {
+        ln
+        for ln, n in counts.items()
+        if n >= 2 and is_consultant_running_header_prefix(ln)
+    }
+    return repeated
 
 
 def structure_split(
@@ -793,8 +823,8 @@ def structure_split(
     line_state = StructureLineState(heading=heading_state)
     blocks: list[tuple[StructureContext, str, int | None]] = []
     cur_ctx = ctx.copy()
-    cur_page = page
-    block_start_page = page
+    cur_page: int | None = None
+    block_start_page: int | None = None
     cur_parts: list[str] = []
     cur_key = cur_ctx.boundary_key()
 
@@ -824,6 +854,7 @@ def structure_split(
             prev_was_structure_heading=line_state.prev_was_structure_heading,
             at_doc_start=line_state.at_doc_start,
             after_page_break=line_state.after_page_break,
+            repeated_headers=repeated_headers,
         )
         for line in lines:
             n_rep = header_counts.get(line, 0)
@@ -930,7 +961,6 @@ def structure_split(
         merged = _collapse_orphan_heading_atoms(merged)
         merged = _merge_volume_heading_atoms(merged)
         merged = _carry_article_over_chapter_colontitel(merged)
-        merged = _implicit_point_one_for_inline_article_body(merged)
         merged = _attach_preamble(merged)
     return merged
 

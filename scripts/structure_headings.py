@@ -272,9 +272,60 @@ def is_code_structure_boundary_line(s: str) -> bool:
     return is_strict_code_volume_heading(s)
 
 
+RE_FZ_RUNNING_HEADER = re.compile(
+    r"(?i)^(?:"
+    r"Федеральный\s+закон\s+от\s+\d{2}\.\d{2}\.\d{4}\s+N\s+\d+(?:\.\d+)?-ФЗ"
+    r"|(?:Постановлени[ея]|Указ)\s+"
+    r"|(?:ГОСТ(?:\s*Р)?|ISO)\s+[\d][\d.\w\-]*"
+    r"|\"?(?:Конституция|Гражданский\s+кодекс|Налоговый\s+кодекс)"
+    r")"
+)
+
+
+def is_consultant_header_wrap_fragment(s: str) -> bool:
+    """Продолжение 2–3-строчного колонтитула ФЗ (перенос названия закона)."""
+    s = s.strip()
+    if not s or len(s) > 200 or RE_POINT_LINE.match(s):
+        return False
+    if re.match(r"^[«\"(]", s) and re.search(r"(?i)федеральн", s):
+        return True
+    if (
+        re.match(r"^[а-яё]", s)
+        and re.search(r'"\s*$', s)
+        and len(s.split()) <= 28
+    ):
+        return True
+    return False
+
+
+def is_consultant_running_header_prefix(s: str) -> bool:
+    """Колонтитул КонсультантПлюс / повторяющаяся шапка страницы (не тело статьи)."""
+    s = s.strip()
+    if not s or len(s) > 240:
+        return False
+    if is_consultant_header_wrap_fragment(s):
+        return True
+    if len(s) < 8:
+        return False
+    if re.search(r"(?i)кодекс", s) and re.match(
+        r'(?i)^(?:\"[^\"]+\"\s+|[^\n]{0,100}?(?:кодекс\b))[^\n]{0,40}\bглава\s+\d+\.',
+        s,
+    ):
+        return True
+    if RE_FZ_RUNNING_HEADER.match(s):
+        return True
+    if re.search(r"(?i)консультант\s*плюс", s):
+        return True
+    return False
+
+
 def is_running_header_line(s: str, *, repeated: bool = False) -> bool:
     s = s.strip()
-    if not s or s.startswith("<!--") or len(s) > BANNER_MAX_LEN:
+    if not s or s.startswith("<!--"):
+        return False
+    if is_consultant_running_header_prefix(s):
+        return True
+    if len(s) > BANNER_MAX_LEN:
         return False
     if repeated and is_strict_code_volume_heading(s):
         return True
@@ -359,6 +410,9 @@ def normalize_prev_for_point(buffer: list[str], prev_raw: str) -> tuple[str, boo
 def boundary_before_structure(prev_line: str, *, line_state: StructureLineState) -> bool:
     """Заголовок/пункт допустим только после границы (N1/N2)."""
     if line_state.after_page_break:
+        return True
+    pl = prev_line.strip()
+    if is_consultant_running_header_prefix(pl) or is_consultant_header_wrap_fragment(pl):
         return True
     if line_state.at_doc_start:
         return True
@@ -681,9 +735,15 @@ def accept_code_point_line(
         return None, None
     pid, rest = m.group(1), m.group(2)
     prev = line_state.prev_line
+    prev_r = prev.rstrip()
+    if is_consultant_running_header_prefix(prev_r) or is_consultant_header_wrap_fragment(
+        prev_r
+    ):
+        if kind == "point" and pid.isdigit() and int(pid) <= 9:
+            return pid, kind
+        return None, None
     if not point_body_starts_ok(rest, prev):
         return None, None
-    prev_r = prev.rstrip()
     if kind == "subpoint":
         if is_article_heading_line(prev_r):
             line_state.prev_list_style = "paren_point"
