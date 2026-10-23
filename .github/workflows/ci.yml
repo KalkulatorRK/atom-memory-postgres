@@ -45,6 +45,57 @@ jobs:
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
 
+  setup-no-admin-dsn:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-throwaway
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      SETUP_SKIP_INSTALL: "1"
+      MEMORY_DB_PASSWORD: ci-setup-pass
+      PGHOST: localhost
+      PGPORT: "5432"
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Wait for Postgres
+        run: |
+          for i in $(seq 1 30); do
+            pg_isready -h localhost -p 5432 -U postgres && exit 0
+            sleep 2
+          done
+          exit 1
+        env:
+          PGPASSWORD: ci-only-throwaway
+      - name: pgpass for postgres OS user (setup without ADMIN_DSN)
+        run: |
+          sudo -u postgres bash -c 'printf "localhost:5432:*:postgres:ci-only-throwaway\n" > ~/.pgpass && chmod 600 ~/.pgpass'
+      - name: setup (no ADMIN_DSN)
+        run: |
+          unset ADMIN_DSN
+          sudo -u postgres bash -c 'printf "localhost:5432:*:postgres:ci-only-throwaway\n" > ~/.pgpass && chmod 600 ~/.pgpass'
+          sudo env PGHOST=localhost PGPORT=5432 MEMORY_DB_PASSWORD="$MEMORY_DB_PASSWORD" SETUP_SKIP_INSTALL=1 \
+            bash scripts/setup_memory_db.sh memory_no_admin memory_no_admin
+      - name: setup re-run idempotent
+        run: |
+          unset ADMIN_DSN
+          sudo env PGHOST=localhost PGPORT=5432 MEMORY_DB_PASSWORD="$MEMORY_DB_PASSWORD" SETUP_SKIP_INSTALL=1 \
+            bash scripts/setup_memory_db.sh memory_no_admin memory_no_admin
+      - name: role exists
+        run: |
+          PGPASSWORD=ci-only-throwaway psql -h localhost -U postgres -d postgres -tAc \
+            "SELECT 1 FROM pg_roles WHERE rolname='memory_no_admin'" | grep -q 1
+
   tests:
     runs-on: ubuntu-24.04
     strategy:

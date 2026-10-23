@@ -1,8 +1,6 @@
 """Регрессии по ревью PR #1 (merge blockers)."""
 import json
 import os
-import subprocess
-
 import psycopg2
 import pytest
 
@@ -62,11 +60,59 @@ def _seed_atom(conn, content: str):
     return aid
 
 
-@pytest.mark.parametrize("query", ["ст. 475", "ГОСТ 7512-82", "12", "v11"])
-def test_hybrid_identifier_queries_do_not_crash(conn, query):
-    _seed_atom(conn, "статья 475 ГОСТ 7512-82 v11 номер 12")
-    sr = search(conn, query, limit=5, mode="hybrid", provider=None, provider_warnings=[])
-    assert isinstance(sr.results, list)
+@pytest.mark.parametrize(
+    "query,needle",
+    [
+        ("ст. 475", "475"),
+        ("ГОСТ 7512-82", "7512-82"),
+        ("12", "12"),
+        ("v11", "v11"),
+    ],
+)
+def test_hybrid_identifier_exact_tier_ranks_first(conn, query, needle):
+    import uuid
+
+    proj = f"pr1_rank_{uuid.uuid4().hex[:10]}"
+    loc = f"/rank_{uuid.uuid4().hex}.pdf"
+    cur = conn.cursor()
+    cur.execute("INSERT INTO projects (name) VALUES (%s) RETURNING id", (proj,))
+    pid = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO sources (project_id, title, source_type, location) "
+        "VALUES (%s,'T','pdf',%s) RETURNING id",
+        (pid, loc),
+    )
+    sid = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO versions (source_id, version_no, sha256) VALUES (%s,1,'x') RETURNING id",
+        (sid,),
+    )
+    vid = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO atoms (version_id, document_id, atom_type, ordinal, content, metadata) "
+        "VALUES (%s,%s,'text',1,'шум без совпадений xyz','{}'::jsonb)",
+        (vid, sid),
+    )
+    cur.execute(
+        "INSERT INTO atoms (version_id, document_id, atom_type, ordinal, content, metadata) "
+        "VALUES (%s,%s,'text',2,%s,'{}'::jsonb) RETURNING id",
+        (vid, sid, f"статья 475 ГОСТ 7512-82 v11 номер 12 {needle}"),
+    )
+    target_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    sr = search(
+        conn,
+        query,
+        project=proj,
+        limit=5,
+        mode="hybrid",
+        provider=None,
+        provider_warnings=["вектор выключен для теста"],
+    )
+    assert sr.results, f"no hits for {query!r}"
+    assert sr.results[0].atom_id == target_id
+    assert sr.results[0].exact is True
 
 
 def test_exact_match_python_word_boundaries():
@@ -90,7 +136,8 @@ def test_mcp_json_compat_shape():
 
     res = [{"id": 1, "content": "x"}]
     assert format_memory_search_response(res, []).startswith("[")
-    wrapped = json.loads(format_memory_search_response([], ["warn"]))
+    assert format_memory_search_response(res, ["vector off"]).startswith("[")
+    wrapped = json.loads(format_memory_search_response([], ["warn"], include_warnings=True))
     assert wrapped["warnings"] == ["warn"]
 
 
@@ -107,32 +154,33 @@ def test_setup_password_sql_injection_safe():
     script = os.path.join(root, "setup_memory_db.sh")
     text = open(script, encoding="utf-8").read()
     assert "PASSWORD '${DB_PASS}'" not in text
-    assert "format('CREATE ROLE" in text or "format('ALTER ROLE" in text
+    assert "render_role_password_sql.py" in text
+    assert "set_db_role_password()" in text
+    assert "-v db_pass=" not in text
 
 
-def test_vector_admin_script_no_concurrent_in_transaction():
+def test_vector_admin_script_single_psql_session():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     text = open(os.path.join(root, "vector_index_admin.sh"), encoding="utf-8").read()
     assert "CREATE INDEX CONCURRENTLY" in text
     assert "SET maintenance_work_mem" in text
-    assert 'psql_admin "$DB" -v ON_ERROR_STOP=1 -c "SET maintenance_work_mem' in text
+    assert 'psql_admin "$DB" -v ON_ERROR_STOP=1' in text
+    assert 'psql_admin "$DB" -v ON_ERROR_STOP=1 -c "SET maintenance_work_mem' not in text
 
 
 def test_migration_down_removes_journal(db_ready):
-    admin = os.environ.get("ADMIN_DSN", "")
-    if not admin:
+    if not os.environ.get("ADMIN_DSN"):
         pytest.skip("ADMIN_DSN")
     from pathlib import Path
-    from urllib.parse import urlparse
+
+    from migration_admin import admin_dsn_for_test_db, apply_sql_file
 
     root = Path(__file__).resolve().parents[2]
-    dbname = urlparse(db_ready).path.lstrip("/")
-    base = admin.rsplit("/", 1)[0]
-    dsn = f"{base}/{dbname}"
+    admin_db = admin_dsn_for_test_db(db_ready)
     down = root / "references/migrations/0004_vector_search_down.sql"
     up = root / "references/migrations/0004_vector_search.sql"
     try:
-        subprocess.run(["psql", dsn, "-v", "ON_ERROR_STOP=1", "-f", str(down)], check=True)
+        apply_sql_file(admin_db, down)
         conn = psycopg2.connect(db_ready)
         cur = conn.cursor()
         cur.execute(
@@ -142,20 +190,18 @@ def test_migration_down_removes_journal(db_ready):
         assert cur.fetchone()[0] == 0
         conn.close()
     finally:
-        subprocess.run(["psql", dsn, "-v", "ON_ERROR_STOP=1", "-f", str(up)], check=True)
+        apply_sql_file(admin_db, up)
 
 
 def test_embed_policy_restored_after_down_and_reapply(db_ready):
-    admin = os.environ.get("ADMIN_DSN", "")
-    if not admin:
+    if not os.environ.get("ADMIN_DSN"):
         pytest.skip("ADMIN_DSN")
     from pathlib import Path
-    from urllib.parse import urlparse
+
+    from migration_admin import admin_dsn_for_test_db, apply_sql_file
 
     root = Path(__file__).resolve().parents[2]
-    dbname = urlparse(db_ready).path.lstrip("/")
-    base = admin.rsplit("/", 1)[0]
-    dsn = f"{base}/{dbname}"
+    admin_db = admin_dsn_for_test_db(db_ready)
     down = root / "references/migrations/0004_vector_search_down.sql"
     up = root / "references/migrations/0004_vector_search.sql"
     conn = psycopg2.connect(db_ready)
@@ -170,12 +216,12 @@ def test_embed_policy_restored_after_down_and_reapply(db_ready):
     cur.close()
     conn.close()
     try:
-        subprocess.run(["psql", dsn, "-v", "ON_ERROR_STOP=1", "-f", str(down)], check=True)
-        subprocess.run(["psql", dsn, "-v", "ON_ERROR_STOP=1", "-f", str(up)], check=True)
+        apply_sql_file(admin_db, down)
+        apply_sql_file(admin_db, up)
         conn = psycopg2.connect(db_ready)
         cur = conn.cursor()
         cur.execute("SELECT embed_policy FROM projects WHERE id = %s", (pid,))
         assert cur.fetchone()[0] == "local_only"
         conn.close()
     finally:
-        subprocess.run(["psql", dsn, "-v", "ON_ERROR_STOP=1", "-f", str(up)], check=True)
+        apply_sql_file(admin_db, up)

@@ -39,10 +39,24 @@ if ! [[ "$DIMS" =~ ^[0-9]+$ ]]; then
   echo "dims должен быть целым числом"
   exit 1
 fi
-if [ "$DIMS" -gt 2000 ] 2>/dev/null; then
-  echo "dims > 2000: нужен halfvec (pgvector ≥ 0.7)"
+if [ "$DIMS" -lt 1 ] 2>/dev/null || [ "$DIMS" -gt 2000 ] 2>/dev/null; then
+  echo "dims: целое от 1 до 2000"
   exit 1
 fi
+if ! [[ "$M" =~ ^[0-9]+$ ]] || [ "$M" -lt 2 ] || [ "$M" -gt 100 ]; then
+  echo "--m: целое от 2 до 100"
+  exit 1
+fi
+if ! [[ "$EFC" =~ ^[0-9]+$ ]] || [ "$EFC" -lt 4 ] || [ "$EFC" -gt 1000 ]; then
+  echo "--ef-construction: целое от 4 до 1000"
+  exit 1
+fi
+if ! [[ "$MPW" =~ ^[0-9]+$ ]]; then
+  echo "max_parallel_maintenance_workers: целое"
+  exit 1
+fi
+
+MEM="$(python3 "$SCRIPT_DIR/vector_index_validate.py" "$MEM")" || exit 1
 
 IDX=$(MODEL="$MODEL" DIMS="$DIMS" SCRIPT_DIR="$SCRIPT_DIR" python3 -c "
 import os, sys
@@ -52,29 +66,36 @@ print(hnsw_index_name(os.environ['MODEL'], int(os.environ['DIMS'])))
 ")
 
 if [ -n "${ADMIN_DSN:-}" ]; then
-  BASE="${ADMIN_DSN%/*}"
-  PSQL=(psql)
-  psql_admin() { psql "${BASE}/$1" "${@:2}"; }
+  psql_admin() {
+    local db="$1"
+    shift
+    local url
+    url="$(DB_NAME="$db" ADMIN_DSN="$ADMIN_DSN" python3 "$SCRIPT_DIR/db_dsn.py" admin-url)"
+    psql "$url" "$@"
+  }
 elif [ "$(id -un)" = "postgres" ]; then
   psql_admin() { psql -d "$1" "${@:2}"; }
 else
-  psql_admin() { sudo -u postgres psql -d "$1" "${@:2}"; }
+  psql_admin() { sudo -u postgres env PGHOST="${PGHOST:-}" PGPORT="${PGPORT:-}" psql -d "$1" "${@:2}"; }
 fi
 
 DB="${PGDATABASE:-memory}"
 
+# Один сеанс: SET (проверка mem) → опционально DROP → CREATE. ON_ERROR_STOP: неверный mem не удаляет индекс.
+DROP_SQL=""
 if [ "$DROP" -eq 1 ]; then
-  psql_admin "$DB" -v ON_ERROR_STOP=1 -c "DROP INDEX IF EXISTS public.\"$IDX\";"
+  DROP_SQL="DROP INDEX IF EXISTS public.\"$IDX\";"
 fi
 
-# CREATE INDEX CONCURRENTLY нельзя в одной транзакции с SET — отдельные вызовы psql.
-psql_admin "$DB" -v ON_ERROR_STOP=1 -c "SET maintenance_work_mem = '${MEM}';"
-psql_admin "$DB" -v ON_ERROR_STOP=1 -c "SET max_parallel_maintenance_workers = ${MPW};"
-psql_admin "$DB" -v ON_ERROR_STOP=1 -v model="$MODEL" -v dims="$DIMS" -v m="$M" -v efc="$EFC" -v idx="$IDX" <<'SQL'
+psql_admin "$DB" -v ON_ERROR_STOP=1 \
+  -v model="$MODEL" -v dims="$DIMS" -v m="$M" -v efc="$EFC" -v idx="$IDX" <<SQL
+SET maintenance_work_mem = '${MEM}';
+SET max_parallel_maintenance_workers = ${MPW};
+${DROP_SQL}
 SELECT format(
   'CREATE INDEX CONCURRENTLY IF NOT EXISTS %I ON public.embeddings USING hnsw ((vector::public.vector(%s)) public.vector_cosine_ops) WITH (m = %s, ef_construction = %s) WHERE model = %L AND dims = %s',
   :'idx', :'dims', :'m', :'efc', :'model', :'dims'
-) \gexec
+) \\gexec
 SQL
 
 echo "готово: $IDX"

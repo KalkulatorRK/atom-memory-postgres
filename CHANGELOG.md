@@ -1,5 +1,21 @@
 # Журнал изменений
 
+## 1.9.1
+
+- **Fix:** `setup_memory_db.sh` без `ADMIN_DSN` снова создаёт роль через `admin_psql` + `render_role_password_sql.py` (stdlib), без psycopg2 от root.
+- **Security:** пароль роли — `format()`/`\gexec` без `DO $$` (инъекция psql `\!`); тесты `test_setup_role_security.py`.
+- **Security:** `vector_index_admin.sh` — единицы `kB`/MB/GB/TB и диапазон mem; DROP только после успешного SET в одном сеансе.
+- Третий аргумент пароля setup — deprecated; удалён неиспользуемый `set_db_role_password.py`.
+- `db_dsn.py`: DSN с query-string (`?sslmode=`) для admin/migration/vector_index.
+- `vector_index_admin.sh`: строгая проверка `--mem`/`--dims`; DROP только после валидации.
+- Зависимость `mcp>=1,<2`; migration-тесты в CI не skip при ошибке ADMIN_DSN; CI job setup без ADMIN_DSN.
+- MCP JSON-RPC `memory_search`: **всегда JSON-массив** по умолчанию; warnings в stderr или opt-in `include_warnings` / `ATOM_MEMORY_MCP_INCLUDE_WARNINGS=1`.
+- `vector_index_admin.sh`: SET и CREATE INDEX в одном сеансе psql; валидация `--m`, `--ef-construction`, `--mem`.
+- Откат `0004_vector_search_down.sql` идемпотентен; снимок `content_hash`/`embed_meta` — без лишнего re-embed после повторного 0004.
+- `setup_memory_db.sh`: повторный запуск пропускает `schema.sql`, если есть `atoms`; пароль роли через `render_role_password_sql.py` + `MEMORY_DB_PASSWORD`.
+- CLI `--json` / `--explain` работают в режиме `--mode fts`.
+- FastMCP: восстановлены docstring инструментов; `scripts/calibrate_min_sim.py` и `docs/SECURITY.md` (ротация пароля).
+
 ## 1.9.0
 
 - Семантический поиск: провайдеры эмбеддингов (облако OpenAI-compatible по умолчанию, local по объявлению, fake в тестах).
@@ -7,7 +23,7 @@
 - `scripts/embed_atoms.py` (backfill, dry-run, политика проектов), интеграция с импортом (`--no-embed`).
 - Гибридный поиск `scripts/search_core.py` (FTS + ILIKE + vector, RRF, ярус точных идентификаторов).
 - CLI `--mode fts|vector|hybrid`, MCP-параметр `mode`, расширенный `memory_stats`.
-- MCP JSON-RPC `memory_search`: по умолчанию ответ — **JSON-массив хитов** (как в 1.8); объект `{results, warnings}` только если есть предупреждения.
+- MCP JSON-RPC `memory_search`: массив хитов по умолчанию (1.8); объект с warnings — opt-in (см. 1.9.1).
 - `scripts/eval_search.py`, `scripts/bench_search.py`, `scripts/vector_index_admin.sh`, CI с `EMBED_PROVIDER=fake`.
 
 ## 1.8.0

@@ -38,6 +38,19 @@ BEGIN
   ALTER TABLE public.embeddings ADD COLUMN IF NOT EXISTS embed_meta jsonb NOT NULL DEFAULT '{}'::jsonb;
   ALTER TABLE public.embeddings ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
 
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'public' AND table_name = '_0004_embeddings_meta_snapshot'
+  ) THEN
+    UPDATE public.embeddings e
+    SET content_hash = s.content_hash,
+        embed_meta = s.embed_meta
+    FROM public._0004_embeddings_meta_snapshot s
+    WHERE e.atom_id = s.atom_id AND e.model = s.model AND e.dims = s.dims;
+    DROP TABLE public._0004_embeddings_meta_snapshot;
+    RAISE NOTICE '0004: восстановлены content_hash/embed_meta из снимка отката (без повторного embed)';
+  END IF;
+
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint WHERE conname = 'embeddings_dims_check'
   ) THEN

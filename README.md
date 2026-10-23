@@ -71,7 +71,8 @@ Atom Memory solves all three:
 ### 1. Deploy the database (PostgreSQL 16+ + pgvector + schema)
 
 ```bash
-sudo bash scripts/setup_memory_db.sh memory hermes your_password
+export MEMORY_DB_PASSWORD='your_password'
+sudo -E bash scripts/setup_memory_db.sh memory hermes
 export PG_DSN="postgresql://hermes:your_password@localhost:5432/memory"
 ```
 

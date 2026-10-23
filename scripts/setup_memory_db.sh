@@ -8,14 +8,17 @@ DB_NAME="${1:-memory}"
 DB_USER="${2:-hermes}"
 DB_PASS="${3:-}"
 
-if [ -z "$DB_PASS" ]; then
-    if [ -n "${MEMORY_DB_PASSWORD:-}" ]; then
-        DB_PASS="$MEMORY_DB_PASSWORD"
-    else
-        echo "Использование: $0 [db_name] [db_user] [db_password]"
-        exit 1
-    fi
+if [ -n "$DB_PASS" ]; then
+    echo "Предупреждение: пароль в argv ($0 … [db_password]) виден в ps; используйте MEMORY_DB_PASSWORD." >&2
+elif [ -n "${MEMORY_DB_PASSWORD:-}" ]; then
+    DB_PASS="$MEMORY_DB_PASSWORD"
+else
+    echo "Использование: MEMORY_DB_PASSWORD=… $0 [db_name] [db_user]"
+    echo "  (устарело: третий аргумент [db_password] — только для совместимости)"
+    exit 1
 fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ident='^[a-zA-Z_][a-zA-Z0-9_]*$'
 if ! [[ "$DB_NAME" =~ $ident && "$DB_USER" =~ $ident ]]; then
@@ -23,18 +26,31 @@ if ! [[ "$DB_NAME" =~ $ident && "$DB_USER" =~ $ident ]]; then
     exit 1
 fi
 
-# DSN суперпользователя для конкретной базы (в CI — TCP, без unix-socket).
+# DSN суперпользователя для конкретной базы (CI: ADMIN_DSN; иначе peer через postgres OS user).
 admin_psql() {
     local db="${1:-postgres}"
     shift
     if [ -n "${ADMIN_DSN:-}" ]; then
-        local base="${ADMIN_DSN%/*}"
-        psql "${base}/${db}" "$@"
+        local url
+        url="$(DB_NAME="$db" ADMIN_DSN="$ADMIN_DSN" python3 "$SCRIPT_DIR/db_dsn.py" admin-url)"
+        psql "$url" "$@"
     elif [ "$(id -un)" = "postgres" ]; then
         psql -d "$db" "$@"
     else
-        sudo -u postgres psql -d "$db" "$@"
+        sudo -u postgres env PGHOST="${PGHOST:-}" PGPORT="${PGPORT:-}" psql -d "$db" "$@"
     fi
+}
+
+set_db_role_password() {
+  DB_USER="$DB_USER" MEMORY_DB_PASSWORD="$DB_PASS" python3 "$SCRIPT_DIR/render_role_password_sql.py" \
+    | admin_psql postgres -v ON_ERROR_STOP=1 -f -
+}
+
+# postgres OS user (sudo) не читает файлы в $HOME runner — подаём SQL через stdin.
+admin_psql_file() {
+  local db="$1"
+  local file="$2"
+  cat "$file" | admin_psql "$db" -v ON_ERROR_STOP=1 -f -
 }
 
 if [ -n "${SETUP_SKIP_INSTALL:-}" ]; then
@@ -77,15 +93,7 @@ echo "[3/4] Создание БД $DB_NAME и пользователя $DB_USER.
 if ! admin_psql postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
   admin_psql postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${DB_NAME}\""
 fi
-if ! admin_psql postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
-  admin_psql postgres -v ON_ERROR_STOP=1 -v db_user="$DB_USER" -v db_pass="$DB_PASS" <<'SQL'
-SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'db_user', :'db_pass') \gexec
-SQL
-else
-  admin_psql postgres -v ON_ERROR_STOP=1 -v db_user="$DB_USER" -v db_pass="$DB_PASS" <<'SQL'
-SELECT format('ALTER ROLE %I PASSWORD %L', :'db_user', :'db_pass') \gexec
-SQL
-fi
+set_db_role_password
 admin_psql postgres -v ON_ERROR_STOP=1 \
   -v db_name="$DB_NAME" -v db_user="$DB_USER" <<'SQL'
 SELECT format('GRANT CONNECT, TEMPORARY ON DATABASE %I TO %I', :'db_name', :'db_user') \gexec
@@ -96,15 +104,18 @@ SELECT format('GRANT USAGE ON SCHEMA public TO %I', :'db_user') \gexec
 SQL
 
 echo "[4/4] Применение схемы..."
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCHEMA="$SCRIPT_DIR/../references/schema.sql"
-admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -f "$SCHEMA"
+if admin_psql "$DB_NAME" -tAc "SELECT to_regclass('public.atoms') IS NOT NULL" | grep -q t; then
+  echo "      База уже инициализирована — пропуск schema.sql (без потери данных)"
+else
+  admin_psql_file "$DB_NAME" "$SCHEMA"
+fi
 for MIGRATION in "$SCRIPT_DIR"/../references/migrations/*.sql; do
     [ -f "$MIGRATION" ] || continue
     case "$MIGRATION" in
       *_down.sql) continue ;;
     esac
-    admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -f "$MIGRATION"
+    admin_psql_file "$DB_NAME" "$MIGRATION"
 done
 
 admin_psql "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'

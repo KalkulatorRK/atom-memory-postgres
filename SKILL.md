@@ -1,7 +1,7 @@
 ---
 name: atom-memory-postgres
 description: "Развернуть атомную память агента на PostgreSQL 16+ + pgvector: схема (7 таблиц), импорт документов (PDF → атомы, таблицы/схемы целиком, LLM-обогащение), поиск FTS по-русски, версионирование и аудит. Загружать, когда пользователь просит развернуть/настроить атомную базу знаний («память агента») на своей машине, перенести стек атомной памяти, или объяснить архитектуру (атомы, atom_links, версии, триггеры поиска)."
-version: 1.9.0
+version: 1.9.1
 author: Hermes Agent + Андрей К
 license: MIT
 platforms: [linux]
@@ -46,7 +46,8 @@ metadata:
 `-v ON_ERROR_STOP=1` вернёт 0 даже при ошибках. Поэтому всё делает скрипт:
 
 ```bash
-sudo bash scripts/setup_memory_db.sh memory hermes 'ваш_пароль'
+export MEMORY_DB_PASSWORD='ваш_пароль'
+sudo -E bash scripts/setup_memory_db.sh memory hermes
 ```
 
 Он ставит PostgreSQL и pgvector, создаёт БД и роль, применяет схему от
@@ -62,7 +63,9 @@ for f in references/migrations/*.sql; do
 done
 ```
 
-Файлы `*_down.sql` — **только ручной откат**, в цикл обновления не включать (иначе сбросятся `embed_policy`, HNSW и колонки embeddings).
+Файлы `*_down.sql` — **только ручной откат**, в цикл обновления не включать (иначе сбросятся `embed_policy`, HNSW и колонки embeddings). Откат 0004 идемпотентен; векторы не удаляются, `content_hash` сохраняется в снимке для повторного 0004 без массового re-embed.
+
+`setup_memory_db.sh` можно запускать повторно: при наличии таблицы `atoms` полный `schema.sql` не выполняется.
 
 Миграции вперёд идемпотентны. Если `0003_location_unique.sql` падает с `duplicate key`,
 в базе два источника с одним путём — их надо слить до повторного прогона.
@@ -71,6 +74,7 @@ done
 
 ```bash
 export PG_DSN="postgresql://hermes:пароль@localhost:5432/memory"
+# MCP JSON-RPC: memory_search возвращает JSON-массив (1.8); warnings — stderr или include_warnings=true
 # опционально (LLM-обогащение):
 export LLM_API_KEY="..."            # или NOUS_API_KEY / ключ любого OpenAI-совместимого API
 export LLM_BASE_URL="https://inference-api.nousresearch.com/v1"   # по умолчанию

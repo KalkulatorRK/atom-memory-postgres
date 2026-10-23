@@ -138,7 +138,7 @@ def main():
     conn = psycopg2.connect(dsn)
     cur = conn.cursor()
 
-    if args.mode == "fts":
+    if args.mode == "fts" and not args.json and not args.explain:
         out = run_fts_legacy(cur, args.query, args.project, args.limit)
         cur.close()
         conn.close()

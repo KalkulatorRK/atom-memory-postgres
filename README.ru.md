@@ -64,7 +64,8 @@ hermes skills install https://raw.githubusercontent.com/KalkulatorRK/atom-memory
 ### 1. Установка БД (PostgreSQL 16+ + pgvector + схема)
 
 ```bash
-sudo bash scripts/setup_memory_db.sh memory hermes your_password
+export MEMORY_DB_PASSWORD='your_password'
+sudo -E bash scripts/setup_memory_db.sh memory hermes
 export PG_DSN="postgresql://hermes:your_password@localhost:5432/memory"
 ```
 
@@ -107,6 +108,10 @@ PDF → [1] разбор (pymupdf) → [2] таблицы/схемы целик�
 ```
 
 Поиск: гибрид FTS + ILIKE + вектор (RRF) → связанные атомы. Backfill: `python3 scripts/embed_atoms.py --dry-run` (оценка), затем без `--dry-run`.
+
+Порог `EMBED_MIN_SIM` по умолчанию **консервативен** (0.72 для облака). Ориентир без сети: `python3 scripts/calibrate_min_sim.py` (fake); точная подстройка — `scripts/eval_search.py` на ваших запросах.
+
+Повторный `setup_memory_db.sh` на существующей БД безопасен: `schema.sql` пропускается, применяются только миграции. Секреты и ротация пароля: [`docs/SECURITY.md`](docs/SECURITY.md).
 
 ### Приватность эмбеддингов
 

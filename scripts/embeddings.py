@@ -516,7 +516,7 @@ def min_similarity_for_space(space: str) -> float:
             return float(raw)
         except ValueError:
             pass
-    # консервативно, не откалибровано
+    # Консервативный дефолт; калибровка: scripts/calibrate_min_sim.py (fake), eval_search на своих данных.
     if space.startswith("fake:"):
         return 0.35
     return 0.72
