@@ -15,6 +15,7 @@ from structure_headings import (
     accept_code_point_line,
     detect_lowercase_heading_style,
     is_structure_heading_line,
+    is_toc_heading_line,
     split_inline_article_segments,
     update_toc_state,
 )
@@ -327,7 +328,7 @@ def extract_document_meta(
     if not sm:
         sm = RE_STANDARD_TITLE.search(options.source_title)
     if sm:
-        standard = sm.group(1).strip()
+        standard = sm.group(1).strip().rstrip(".")
     return red, eff, law if law else None, standard, meta_warn
 
 
@@ -359,6 +360,8 @@ def _update_ctx_from_paragraph(
             ctx.point = None
             ctx.subpoint = None
             return True
+        if is_toc_heading_line(s):
+            return True
 
     m = RE_CHAPTER.match(s)
     if m:
@@ -387,8 +390,11 @@ def _update_ctx_from_paragraph(
 
     m = RE_GOST_SECTION_STRICT.match(s)
     if ctx.doc_kind in ("gost", "sdank") and m:
+        from structure_headings import RE_FZ_WRAP_LINE
+
         if (
             RE_FZ_LINE.match(s)
+            or RE_FZ_WRAP_LINE.match(s)
             or RE_DATE_LINE.match(s)
             or RE_DANGLING_REF.search(prev_line.strip())
         ):
@@ -425,11 +431,17 @@ def _expand_structure_lines(
     *,
     heading_state: ArticleHeadingState | None = None,
     doc_kind: str | None = None,
-    line_state: StructureLineState | None = None,
+    prev_line: str = "",
+    prev_was_structure_heading: bool = False,
+    at_doc_start: bool = True,
+    after_page_break: bool = False,
 ) -> list[str]:
-    """Строки абзаца; capital «Статья» только после конца предложения (не «п. 3.»)."""
+    """Строки абзаца; не изменяет общий line_state (Q3)."""
     out: list[str] = []
-    ls = line_state or StructureLineState()
+    local_prev = prev_line
+    local_was = prev_was_structure_heading
+    local_start = at_doc_start
+    local_pb = after_page_break
     for raw in para.split("\n"):
         line = raw.strip()
         if not line:
@@ -440,29 +452,32 @@ def _expand_structure_lines(
                 lowercase_headings=heading_state.lowercase_headings,
                 after_toc_restart=heading_state.after_toc_restart,
                 in_toc_run=heading_state.in_toc_run,
+                consecutive_heading_lines=heading_state.consecutive_heading_lines,
             )
             peek_ls = StructureLineState(
-                prev_line=ls.prev_line,
-                at_doc_start=ls.at_doc_start,
-                after_page_break=ls.after_page_break,
+                prev_line=local_prev,
+                at_doc_start=local_start,
+                after_page_break=local_pb,
                 heading=peek,
-                prev_was_structure_heading=ls.prev_was_structure_heading,
+                prev_was_structure_heading=local_was,
             )
             num, _ = accept_article_heading(
                 line, peek, doc_kind=doc_kind, line_state=peek_ls
             )
             if num:
                 out.append(line)
-                ls.prev_line = line
-                ls.at_doc_start = False
-                ls.prev_was_structure_heading = True
+                local_prev = line
+                local_was = True
+                local_start = False
+                local_pb = False
                 continue
         for seg in split_inline_article_segments(line):
             if seg:
                 out.append(seg)
-                ls.prev_line = seg
-                ls.at_doc_start = False
-                ls.prev_was_structure_heading = is_structure_heading_line(seg)
+                local_prev = seg
+                local_was = is_structure_heading_line(seg)
+                local_start = False
+                local_pb = False
     return out or ([para.strip()] if para.strip() else [])
 
 
@@ -572,7 +587,10 @@ def structure_split(
             para,
             heading_state=heading_state,
             doc_kind=cur_ctx.doc_kind,
-            line_state=line_state,
+            prev_line=line_state.prev_line,
+            prev_was_structure_heading=line_state.prev_was_structure_heading,
+            at_doc_start=line_state.at_doc_start,
+            after_page_break=line_state.after_page_break,
         )
         for line in lines:
             update_toc_state(line_state, line)
@@ -651,7 +669,13 @@ def build_page_context_map(text: str, ctx: StructureContext) -> dict[int, dict[s
             ls.after_page_break = True
         body = PAGE_MARK.sub("", para).strip()
         for line in _expand_structure_lines(
-            body, heading_state=hs, doc_kind=cur.doc_kind, line_state=ls
+            body,
+            heading_state=hs,
+            doc_kind=cur.doc_kind,
+            prev_line=ls.prev_line,
+            prev_was_structure_heading=ls.prev_was_structure_heading,
+            at_doc_start=ls.at_doc_start,
+            after_page_break=ls.after_page_break,
         ):
             update_toc_state(ls, line)
             _update_ctx_from_paragraph(

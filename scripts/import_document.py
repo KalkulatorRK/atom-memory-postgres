@@ -91,7 +91,9 @@ def pdf_to_text(pdf_path: str) -> str:
         f"<!-- страница {n} -->\n{t}" for n, t in pdf_to_pages(pdf_path) if t.strip())
 
 
-def _normalize_is_numbered_heading(s: str, prev_line: str = "") -> bool:
+def _normalize_is_numbered_heading(
+    s: str, prev_line: str = "", *, prev_was_structure_heading: bool = False
+) -> bool:
     from structure_headings import StructureLineState, accept_code_point_line
 
     if len(s) >= 120 or not s or not s[0].isdigit():
@@ -100,12 +102,10 @@ def _normalize_is_numbered_heading(s: str, prev_line: str = "") -> bool:
         return False
     if re.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}\b", s):
         return False
-    from structure_headings import is_structure_heading_line
-
     ls = StructureLineState(
         prev_line=prev_line,
         at_doc_start=not prev_line.strip(),
-        prev_was_structure_heading=is_structure_heading_line(prev_line),
+        prev_was_structure_heading=prev_was_structure_heading,
     )
     if accept_code_point_line(s, ls)[0]:
         return True
@@ -118,7 +118,11 @@ def _normalize_is_numbered_heading(s: str, prev_line: str = "") -> bool:
 
 def normalize_text(md: str) -> str:
     """Склейка переносов строк внутри абзацев (PDF-колонки)."""
-    from structure_headings import RE_ARTICLE_BARE
+    from structure_headings import (
+        RE_ARTICLE_BARE,
+        is_paren_boundary_line,
+        normalize_prev_for_point,
+    )
 
     lines = md.split('\n')
     out = []
@@ -139,13 +143,16 @@ def normalize_text(md: str) -> str:
             out.append(s)
             prev_raw = s
             continue
-        prev_heading_tail = buffer[-1] if buffer else prev_raw
+        prev_line, prev_was = normalize_prev_for_point(buffer, prev_raw)
         is_new_block = (
             s.startswith('<!--') or s.startswith('#') or s.startswith('- ') or
             s.startswith('* ') or s.startswith('|') or
             re.match(r'^(?:Статья|СТАТЬЯ)\s+\d', s) or
             re.match(r'^(?:Глава|ГЛАВА|Раздел|РАЗДЕЛ|Часть)\s', s, re.IGNORECASE) or
-            _normalize_is_numbered_heading(s, prev_heading_tail) or
+            is_paren_boundary_line(s) or
+            _normalize_is_numbered_heading(
+                s, prev_line, prev_was_structure_heading=prev_was
+            ) or
             s.startswith(('Приложение', 'ГОСТ', 'Таблица', 'Примечание', 'ПРИЛОЖЕНИЕ'))
         )
         if is_new_block and buffer:

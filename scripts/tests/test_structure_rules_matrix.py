@@ -54,6 +54,20 @@ def _structure_keys(atoms: list) -> list[AtomKey]:
     return out
 
 
+def _chk_gost_no_section_46(_ctx, atoms):
+    assert not any(
+        (a.get("structure_meta") or {}).get("section_path") == ["46"] for a in atoms
+    )
+
+
+def _chk_q4_no_121_points(_ctx, atoms):
+    assert not any(
+        (a.get("structure_meta") or {}).get("article") == "12.1"
+        and (a.get("structure_meta") or {}).get("point") in ("2", "3")
+        for a in atoms
+    )
+
+
 def _chk_n1_no_cascade(_ctx, atoms):
     assert not any(
         (a.get("structure_meta") or {}).get("article") == "12"
@@ -150,12 +164,7 @@ CASES: list[RulesCase] = [
         ],
         "code",
         "toc.pdf",
-        [
-            ("1", None, None),
-            ("2", None, None),
-            ("3", None, None),
-            ("1", "1", None),
-        ],
+        [("2", None, None), ("3", None, None), ("1", "1", None)],
     ),
     RulesCase(
         "P3_fz_lowercase_subpoints",
@@ -269,7 +278,7 @@ CASES: list[RulesCase] = [
         ],
         "code",
         "probe_mid.pdf",
-        [("12", "1", None), ("13", "1", None), ("13", "3", None)],
+        [("12", "1", None), ("13", "1", None), ("13", "2", None), ("13", "3", None)],
         extra=_chk_n1_no_cascade,
     ),
     RulesCase(
@@ -321,6 +330,112 @@ CASES: list[RulesCase] = [
         "gost",
         "gost_ref46.pdf",
         [(None, "4", None), (None, "4.1", None)],
+    ),
+    RulesCase(
+        "Q1_heading_wrap",
+        [
+            "Статья 456. Обязанности продавца по передаче товаров,",
+            "относящихся к товару",
+            "1. Продавец обязан передать покупателю товар достаточной длины для gate.",
+            "2. Второй пункт статьи четыреста пятьдесят шесть для quality gate.",
+        ],
+        "code",
+        "c_heading_wrap.pdf",
+        [("456", "1", None), ("456", "2", None)],
+    ),
+    RulesCase(
+        "Q2_redline_paren",
+        [
+            "Статья 459. Ответственность",
+            "1. Первый пункт статьи МАРКЕРРЛ1 достаточной длины для quality gate.",
+            "(в ред. Федерального закона от 26.11.2001 N 147-ФЗ)",
+            "2. Второй пункт статьи МАРКЕРРЛ2 достаточной длины для quality gate.",
+            "(п. 2 в ред. Федерального закона от 01.01.2020 N 1-ФЗ)",
+            "3. Третий пункт статьи МАРКЕРРЛ3 достаточной длины для quality gate.",
+        ],
+        "code",
+        "c_redline.pdf",
+        [("459", "1", None), ("459", "2", None), ("459", "3", None)],
+    ),
+    RulesCase(
+        "Q3_page_glued_point",
+        [
+            "Статья 461. Передача",
+            "1. Первый пункт статьи достаточной длины для quality gate filter test.",
+            "2. Второй пункт с маркером МАРКЕРПЕ2 достаточной длины для gate. 1",
+        ],
+        "code",
+        "c_pageend.pdf",
+        [("461", "1", None), ("461", "2", None)],
+    ),
+    RulesCase(
+        "Q3_mid_article_reject",
+        [
+            "Статья 12.4. Основная",
+            "1. Текст статьи двенадцать четыре достаточной длины для quality gate.",
+            "2. Ссылка на Статья 12.20. Устаревшая норма в середине текста достаточной длины.",
+            "Статья 12.5. Следующая",
+            "1. Текст статьи двенадцать пять достаточной длины для quality gate filter.",
+            "Статья 12.6. Ещё",
+            "1. Текст статьи двенадцать шесть достаточной длины для quality gate filter.",
+        ],
+        "code",
+        "c_chain_hi.pdf",
+        [("12.4", "1", None), ("12.4", "2", None), ("12.5", "1", None), ("12.6", "1", None)],
+    ),
+    RulesCase(
+        "Q4_repealed_chain",
+        [
+            "Статья 12.1. Действующая",
+            "1. Текст двенадцать один достаточной длины для quality gate filter.",
+            "Статья 12.2. Утратила силу.",
+            "Статья 12.3. Утратила силу.",
+            "Статья 12.4. Управление",
+            "1. Первый пункт двенадцать четыре достаточной длины для quality gate.",
+            "2. Второй пункт МАРКЕР124П2 достаточной длины для quality gate filter.",
+            "3. Третий пункт МАРКЕР124П3 достаточной длины для quality gate filter.",
+        ],
+        "code",
+        "c_chain.pdf",
+        [
+            ("12.1", "1", None),
+            ("12.2", None, None),
+            ("12.3", None, None),
+            ("12.4", "1", None),
+            ("12.4", "2", None),
+            ("12.4", "3", None),
+        ],
+        extra=_chk_q4_no_121_points,
+    ),
+    RulesCase(
+        "Q2_toc_single_chapter",
+        [
+            "Глава 1. Общие положения",
+            "Статья 1. Введение",
+            "Глава 2. Права",
+            "Статья 1. Основные понятия",
+            "1. Текст первой статьи второй главы достаточной длины для gate.",
+            "Статья 2. Права граждан",
+            "1. Текст второй статьи достаточной длины для quality gate filter.",
+        ],
+        "code",
+        "toc_single.pdf",
+        [("1", "1", None), ("2", "1", None)],
+    ),
+    RulesCase(
+        "Q_gost_ref46_no_46",
+        [
+            "ГОСТ Р 56542-2019",
+            "1 Область применения",
+            "Настоящий стандарт применяется в соответствии со статьей",
+            "46 Федерального закона о техническом регулировании и достаточным текстом.",
+            "4 Порядок",
+            "4.1 Контроль проводят по утверждённой методике достаточной длины.",
+        ],
+        "gost",
+        "gost_ref46_wrap.pdf",
+        [(None, "1", None), (None, "4", None), (None, "4.1", None)],
+        extra=_chk_gost_no_section_46,
     ),
 ]
 

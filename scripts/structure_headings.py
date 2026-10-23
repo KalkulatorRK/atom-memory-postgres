@@ -43,6 +43,12 @@ RE_REF_WORD_BEFORE_POINT = re.compile(
 
 RE_LOWERCASE_WORD_TAIL = re.compile(r"[а-яё]\s*$", re.IGNORECASE)
 
+RE_PAREN_BOUNDARY = re.compile(
+    r"^\((?:в\s*ред\.|п\.\s*\d+\s*в\s*ред\.|введен|введён|утратил|утратила)",
+    re.IGNORECASE,
+)
+RE_FZ_WRAP_LINE = re.compile(r"^\d+\s+Федерального\s+зак", re.IGNORECASE)
+
 
 @dataclass
 class ArticleHeadingState:
@@ -105,12 +111,44 @@ def is_structure_heading_line(s: str) -> bool:
     )
 
 
+def is_paren_boundary_line(s: str) -> bool:
+    s = s.strip()
+    if not s:
+        return False
+    if RE_PAREN_BOUNDARY.match(s):
+        return True
+    return s.startswith("(") and s.endswith(")")
+
+
+def block_started_with_structure_heading(buffer_first: str) -> bool:
+    first = buffer_first.strip()
+    return bool(
+        is_structure_heading_line(first)
+        or re.match(r"^(?:Статья|СТАТЬЯ)\s+\d", first)
+    )
+
+
+def is_repealed_article_heading(s: str) -> bool:
+    s = s.strip()
+    return bool(is_article_heading_line(s) and re.search(r"(?i)утратил[аи]?\s+силу", s))
+
+
+def counts_toward_toc_run(s: str) -> bool:
+    """2+ подряд заголовков с названием (P2); не голая «Статья N» / не «Утратила силу» (Q4)."""
+    s = s.strip()
+    if not is_article_heading_line(s):
+        return False
+    if is_repealed_article_heading(s) or RE_ARTICLE_BARE.match(s):
+        return False
+    return True
+
+
 def is_real_sentence_end_before(text: str) -> bool:
     """Конец предложения/абзаца перед кандидатом в заголовок (не «п. 3.»)."""
     before = text.rstrip()
     if not before:
         return False
-    if before[-1] not in ".:;!?":
+    if before[-1] not in ".:;!?)":
         return False
     if before[-1] == ".":
         if RE_DATE_END.search(before):
@@ -118,6 +156,17 @@ def is_real_sentence_end_before(text: str) -> bool:
         if RE_ABBREV_BEFORE_DOT.search(before):
             return False
     return True
+
+
+def normalize_prev_for_point(buffer: list[str], prev_raw: str) -> tuple[str, bool]:
+    """Контекст блока для решения «N.» в normalize_text (Q1)."""
+    if not buffer:
+        return prev_raw, is_structure_heading_line(prev_raw)
+    joined = " ".join(buffer)
+    if block_started_with_structure_heading(buffer[0]):
+        if not is_real_sentence_end_before(joined):
+            return joined, True
+    return buffer[-1], is_structure_heading_line(buffer[-1])
 
 
 def boundary_before_structure(prev_line: str, *, line_state: StructureLineState) -> bool:
@@ -132,6 +181,8 @@ def boundary_before_structure(prev_line: str, *, line_state: StructureLineState)
         return False
     if line_state.prev_was_structure_heading:
         return True
+    if is_paren_boundary_line(prev_line):
+        return True
     return is_real_sentence_end_before(prev_line)
 
 
@@ -142,6 +193,8 @@ def is_toc_heading_line(s: str) -> bool:
     if RE_TOC_TRAIL.search(s):
         return True
     if is_article_heading_line(s):
+        if RE_ARTICLE_BARE.match(s):
+            return False
         if re.search(r"\.{3,}|…", s):
             return True
         if re.search(r"\s\d+\s*$", s) and not re.search(r"\.\s+[A-ZА-ЯЁ]", s):
@@ -174,10 +227,18 @@ def _heading_article_num(s: str) -> tuple[int, ...] | None:
 
 
 def update_toc_state(line_state: StructureLineState, line: str) -> None:
-    """TOC = 2+ подряд заголовков статей; тело — рестарт N ≤ last (P2)."""
+    """TOC = 2+ подряд заголовков без тела; тело — рестарт N ≤ last (P2/Q4)."""
     s = line.strip()
     hs = line_state.heading
-    if is_article_heading_line(s):
+    if RE_CHAPTER_HEADING.match(s):
+        hs.consecutive_heading_lines = 0
+        hs.in_toc_run = False
+        return
+    if is_repealed_article_heading(s):
+        hs.consecutive_heading_lines = 0
+        hs.in_toc_run = False
+        return
+    if counts_toward_toc_run(s):
         num = _heading_article_num(s)
         if hs.in_toc_run and num and hs.last_article and num < hs.last_article:
             hs.after_toc_restart = True
@@ -192,6 +253,13 @@ def update_toc_state(line_state: StructureLineState, line: str) -> None:
         if hs.in_toc_run:
             hs.after_toc_restart = True
             hs.in_toc_run = False
+        hs.consecutive_heading_lines = 0
+        return
+    if is_article_heading_line(s):
+        num = _heading_article_num(s)
+        if hs.in_toc_run and num and hs.last_article and num < hs.last_article:
+            hs.after_toc_restart = True
+        hs.in_toc_run = False
         hs.consecutive_heading_lines = 0
         return
     hs.consecutive_heading_lines = 0
@@ -246,8 +314,13 @@ def accept_article_heading(
     if not num_s:
         return None, None
 
-    if not boundary_before_structure(
-        line_state.prev_line, line_state=line_state
+    toc_style = is_toc_heading_line(s)
+    if (
+        not toc_style
+        and state.last_article is not None
+        and not boundary_before_structure(
+            line_state.prev_line, line_state=line_state
+        )
     ):
         return None, None
 
@@ -261,6 +334,8 @@ def accept_article_heading(
     state.last_article = num
     if allow_restart:
         state.after_toc_restart = False
+    if toc_style and not state.in_toc_run:
+        return None, None
     tail = s.split(None, 2)
     title = tail[2] if len(tail) > 2 else ""
     return num_s, title

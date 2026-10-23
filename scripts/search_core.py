@@ -595,6 +595,11 @@ def search_fts_only(
         lcur.close()
     leg_cur.close()
     cur.close()
+    if not hits and as_of:
+        warnings.append(
+            "нет редакции документов на указанную дату (--as-of); "
+            "попробуйте другую дату или уберите фильтр"
+        )
     return SearchResult(results=hits[:limit], warnings=warnings, mode_used="fts", legs={})
 
 
@@ -857,6 +862,17 @@ def search(
 
     leg_cur.close()
     cur.close()
+    if not hits and as_of_resolved:
+        warnings = [
+            w
+            for w in warnings
+            if "в базе нет векторов" not in w and "векторная ветка недоступна" not in w
+        ]
+        if not any("нет редакции" in w for w in warnings):
+            warnings.append(
+                "нет редакции документов на указанную дату (--as-of); "
+                "попробуйте другую дату или уберите фильтр"
+            )
     mode_used = mode
     if mode == "hybrid" and not vector_ok and provider is None:
         mode_used = "fts"
