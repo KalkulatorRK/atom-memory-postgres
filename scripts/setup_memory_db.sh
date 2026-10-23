@@ -36,7 +36,7 @@ admin_psql() {
     elif [ "$(id -un)" = "postgres" ]; then
         psql -d "$db" "$@"
     else
-        sudo -u postgres psql -d "$db" "$@"
+        sudo -u postgres env PGHOST="${PGHOST:-}" PGPORT="${PGPORT:-}" psql -d "$db" "$@"
     fi
 }
 

@@ -83,12 +83,13 @@ jobs:
       - name: setup (no ADMIN_DSN)
         run: |
           unset ADMIN_DSN
-          sudo -u postgres env PGHOST=localhost PGPORT=5432 MEMORY_DB_PASSWORD="$MEMORY_DB_PASSWORD" SETUP_SKIP_INSTALL=1 \
+          sudo -u postgres bash -c 'printf "localhost:5432:*:postgres:ci-only-throwaway\n" > ~/.pgpass && chmod 600 ~/.pgpass'
+          sudo env PGHOST=localhost PGPORT=5432 MEMORY_DB_PASSWORD="$MEMORY_DB_PASSWORD" SETUP_SKIP_INSTALL=1 \
             bash scripts/setup_memory_db.sh memory_no_admin memory_no_admin
       - name: setup re-run idempotent
         run: |
           unset ADMIN_DSN
-          sudo -u postgres env PGHOST=localhost PGPORT=5432 MEMORY_DB_PASSWORD="$MEMORY_DB_PASSWORD" SETUP_SKIP_INSTALL=1 \
+          sudo env PGHOST=localhost PGPORT=5432 MEMORY_DB_PASSWORD="$MEMORY_DB_PASSWORD" SETUP_SKIP_INSTALL=1 \
             bash scripts/setup_memory_db.sh memory_no_admin memory_no_admin
       - name: role exists
         run: |
