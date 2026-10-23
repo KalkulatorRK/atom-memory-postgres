@@ -41,12 +41,8 @@ admin_psql() {
 }
 
 set_db_role_password() {
-    local tmp
-    tmp="$(mktemp)"
-    chmod 600 "$tmp"
-    DB_USER="$DB_USER" MEMORY_DB_PASSWORD="$DB_PASS" python3 "$SCRIPT_DIR/render_role_password_sql.py" > "$tmp"
-    admin_psql postgres -v ON_ERROR_STOP=1 -f "$tmp"
-    rm -f "$tmp"
+  DB_USER="$DB_USER" MEMORY_DB_PASSWORD="$DB_PASS" python3 "$SCRIPT_DIR/render_role_password_sql.py" \
+    | admin_psql postgres -v ON_ERROR_STOP=1 -f -
 }
 
 if [ -n "${SETUP_SKIP_INSTALL:-}" ]; then
