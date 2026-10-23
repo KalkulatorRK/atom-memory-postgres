@@ -11,6 +11,7 @@ import argparse
 import hashlib
 
 from _common import normalize_table_no, normalize_fig_no, __version__
+from structure import DocImportOptions, prepare_for_import, structure_split
 import json
 import os
 import re
@@ -310,6 +311,36 @@ def quality_gate(atoms):
     return clean, dropped
 
 
+STRUCTURE_META_KEYS = (
+    "doc_kind",
+    "law",
+    "chapter",
+    "article",
+    "article_title",
+    "point",
+    "subpoint",
+    "section_path",
+    "annex",
+    "redaction",
+    "effective_date",
+    "redaction_source",
+)
+
+
+def _hint_to_metadata(atom: dict) -> dict:
+    hint = atom.get("metadata_hint") or {}
+    sm = atom.get("structure_meta") or {}
+    out = {}
+    for k in STRUCTURE_META_KEYS:
+        if k in hint and hint[k] is not None:
+            out[k] = hint[k]
+        elif k in sm and sm[k] is not None:
+            out[k] = sm[k]
+    if atom.get("page") and "page" not in out:
+        out["page"] = atom.get("page")
+    return out
+
+
 def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
     """Шаг 3: DeepSeek-обогащение с контекст-припиской (батч по 5)."""
     import requests
@@ -329,7 +360,8 @@ def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
         for atom in atoms_batch:
             enriched.append({**atom, "metadata": {
                 "tags": [], "entities": [], "summary": atom["content"][:80],
-                "atom_type": atom["atom_type"], "source_doc": doc_title}})
+                "atom_type": atom["atom_type"], "source_doc": doc_title,
+                **_hint_to_metadata(atom)}})
         return enriched
 
     items = []
@@ -401,12 +433,14 @@ def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
                 "atom_type": meta.get("atom_type", atom["atom_type"]),
                 "refs": meta.get("refs", []),
                 **({"page": atom.get("page")} if atom.get("page") else {}),
-                "source_doc": doc_title}})
+                "source_doc": doc_title,
+                **_hint_to_metadata(atom)}})
     else:
         for atom in atoms_batch:
             enriched.append({**atom, "metadata": {
                 "tags": [], "entities": [], "summary": atom["content"][:80],
-                "atom_type": atom["atom_type"], "refs": [], "source_doc": doc_title}})
+                "atom_type": atom["atom_type"], "refs": [], "source_doc": doc_title,
+                **_hint_to_metadata(atom)}})
     return enriched
 
 
@@ -433,7 +467,14 @@ def _existing_source(pdf_path):
     return {"project": row[0], "sha": row[1], "same": row[1] == sha}
 
 
-def import_doc(pdf_path, project_name):
+def import_doc(
+    pdf_path,
+    project_name,
+    *,
+    doc_kind: str = "auto",
+    redaction: str | None = None,
+    effective_date: str | None = None,
+):
     t0 = time.time()
     existing = _existing_source(pdf_path)
     if existing and existing["project"] != project_name:
@@ -446,14 +487,29 @@ def import_doc(pdf_path, project_name):
     print("[1/4] Конвертация PDF → текст...")
     md = pdf_to_text(pdf_path)
     md = normalize_text(md)
+    doc_title = os.path.basename(pdf_path)
+    imp_opts = DocImportOptions(
+        doc_kind=doc_kind,
+        redaction=redaction,
+        effective_date=effective_date,
+        source_title=doc_title,
+    )
+    md, struct_ctx, page_map = prepare_for_import(md, imp_opts)
     print(f"      Текст: {len(md)} символов, {time.time()-t0:.0f} сек")
+    if struct_ctx:
+        print(f"      Структурный профиль: {struct_ctx.doc_kind}")
 
     print("[1а] Таблицы и изображения...")
     tables, images = extract_tables_images(pdf_path)
     print(f"      Таблиц: {len(tables)}, изображений: {len(images)}")
 
     print("[2/4] Умная резка по предложениям + quality gate...")
-    text_atoms = smart_split(md)
+    if struct_ctx:
+        text_atoms = structure_split(
+            md, struct_ctx, chunk_max=CHUNK_MAX, chunk_min=CHUNK_MIN
+        )
+    else:
+        text_atoms = smart_split(md)
     text_atoms, dropped = quality_gate(text_atoms)
     print(f"      Текст-атомов: {len(text_atoms)} (отброшено мусора: {dropped})")
 
@@ -461,7 +517,11 @@ def import_doc(pdf_path, project_name):
     all_atoms = []
     for t in tables:
         t["ordinal"] = len(all_atoms)
-        t["metadata_hint"] = {"table_no": t.get("table_no"), "title": t.get("title"), "page": t.get("page")}
+        hint = {"table_no": t.get("table_no"), "title": t.get("title"), "page": t.get("page")}
+        pg = t.get("page")
+        if pg and page_map.get(pg):
+            hint.update({k: v for k, v in page_map[pg].items() if k != "page"})
+        t["metadata_hint"] = hint
         all_atoms.append(t)
     for im in images:
         im["ordinal"] = len(all_atoms)
@@ -469,14 +529,15 @@ def import_doc(pdf_path, project_name):
         all_atoms.append(im)
     for a in text_atoms:
         a["ordinal"] = len(all_atoms)
-        a["metadata_hint"] = {"page": a.get("page")}
+        hint = {"page": a.get("page")}
+        hint.update(a.get("structure_meta") or {})
+        a["metadata_hint"] = hint
         all_atoms.append(a)
 
     print(f"      Всего атомов: {len(all_atoms)}")
 
     print("[3/4] Обогащение DeepSeek (параллельно, только текст-атомы)...")
     enriched = []
-    doc_title = os.path.basename(pdf_path)
 
     # Таблицы и изображения: метаданные уже дал код (table_no/fig_no/file_path)
     # НЕ отправляем их в LLM (принцип разумности — экономия 36% вызовов, $0)
@@ -597,6 +658,9 @@ def import_doc(pdf_path, project_name):
             meta["page"] = hint["page"]
         if hint.get("caption"):
             meta["caption"] = hint["caption"]
+        for k in STRUCTURE_META_KEYS:
+            if hint.get(k) is not None and k not in meta:
+                meta[k] = hint[k]
 
         cur.execute(
             "INSERT INTO atoms (version_id, document_id, atom_type, ordinal, content, metadata) "
@@ -694,8 +758,22 @@ if __name__ == "__main__":
     parser.add_argument("--file", required=True)
     parser.add_argument("--project", default="default")
     parser.add_argument("--no-embed", action="store_true", help="не считать эмбеддинги после импорта")
+    parser.add_argument(
+        "--doc-kind",
+        default="auto",
+        choices=["auto", "code", "gost", "sdank", "none"],
+        help="структурная нарезка: кодекс, ГОСТ/СДАНК или обычный PDF (none/auto)",
+    )
+    parser.add_argument("--redaction", default="", help="редакция документа (перекрывает автоизвлечение)")
+    parser.add_argument("--effective-date", default="", help="дата вступления в силу (ISO или DD.MM.YYYY)")
     args = parser.parse_args()
     if args.no_embed:
         import_doc._no_embed = True
-    n_atoms, n_links = import_doc(args.file, args.project)
+    n_atoms, n_links = import_doc(
+        args.file,
+        args.project,
+        doc_kind=args.doc_kind,
+        redaction=args.redaction or None,
+        effective_date=args.effective_date or None,
+    )
     print(f"\n✅ Импортировано атомов: {n_atoms}, связей: {n_links}")

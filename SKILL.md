@@ -1,7 +1,7 @@
 ---
 name: atom-memory-postgres
 description: "Развернуть атомную память агента на PostgreSQL 16+ + pgvector: схема (7 таблиц), импорт документов (PDF → атомы, таблицы/схемы целиком, LLM-обогащение), поиск FTS по-русски, версионирование и аудит. Загружать, когда пользователь просит развернуть/настроить атомную базу знаний («память агента») на своей машине, перенести стек атомной памяти, или объяснить архитектуру (атомы, atom_links, версии, триггеры поиска)."
-version: 1.9.1
+version: 1.10.0
 author: Hermes Agent + Андрей К
 license: MIT
 platforms: [linux]
@@ -86,9 +86,13 @@ export MEMORY_ASSETS_DIR="$HOME/memory_import/assets"             # куда к�
 
 ```bash
 python3 scripts/import_document.py --file document.pdf --project "my-project"
+# Кодексы / ГОСТ / СДАНК — структурная нарезка (статья, пункт, раздел):
+python3 scripts/import_document.py --file gk_part2.pdf --project law \
+  --doc-kind code --redaction "ред. от 01.01.2024" --effective-date 2024-01-01
+python3 scripts/import_document.py --file gost.pdf --project nk --doc-kind gost
 ```
 
-Конвейер: PDF → нормализация (склейка колонок) → таблицы/изображения ЦЕЛИКОМ (с `table_no`/`fig_no`) → умная резка по границам предложений (300–500 симв) → quality gate → LLM-обогащение (батчи, контекст-приписка) → запись одной транзакцией + резолвинг `refs` → `atom_links` (+`normalize_links.py` для сложных ссылок).
+Конвейер: PDF → нормализация (склейка колонок) → таблицы/изображения ЦЕЛИКОМ (с `table_no`/`fig_no`) → умная резка по границам предложений (300–500 симв) **или** структурная нарезка (`--doc-kind auto|code|gost|sdank`) → quality gate → LLM-обогащение (батчи, контекст-приписка) → запись одной транзакцией + резолвинг `refs` → `atom_links` (+`normalize_links.py` для сложных ссылок). Метаданные цитаты: `law`, `article`, `point`, `section_path`, `redaction`, `effective_date`.
 
 Повторный импорт того же файла (изменённого содержимого) = **новая версия** (`version_no+1`), старые атомы → `superseded` (не удаляются — история).
 Если содержимое не менялось (sha совпал), импорт пропускается. Чтобы переимпортировать неизменённый документ, удалите его источник из базы или измените файл.
@@ -98,6 +102,7 @@ python3 scripts/import_document.py --file document.pdf --project "my-project"
 ```bash
 python3 scripts/memory_query.py "чувствительность ИКИ" --limit 5
 python3 scripts/memory_query.py "метод контроля" --project "my-project"
+python3 scripts/memory_query.py "ст. 475" --project law --law "ГК РФ%" --as-of 2024-06-01
 ```
 
 Логика: FTS по русским и английским стемам (`ru_en`) → если мало результатов, fallback ILIKE по значимым токенам (включая числа). Вывод компактный — агент собирает из него ответ со ссылками.

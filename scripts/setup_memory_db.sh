@@ -25,6 +25,10 @@ if ! [[ "$DB_NAME" =~ $ident && "$DB_USER" =~ $ident ]]; then
     echo "Имя БД и пользователя: только латиница, цифры и подчёркивание."
     exit 1
 fi
+if [[ "$DB_USER" == pg_* ]]; then
+    echo "Имя пользователя не может начинаться с pg_ (зарезервировано PostgreSQL)."
+    exit 1
+fi
 
 # DSN суперпользователя для конкретной базы (CI: ADMIN_DSN; иначе peer через postgres OS user).
 admin_psql() {

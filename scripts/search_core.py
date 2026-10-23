@@ -15,6 +15,7 @@ from embeddings import (
     min_similarity_for_space,
     resolve_provider,
 )
+from structure import format_citation
 
 SEARCH_LEG_K = int(os.environ.get("SEARCH_LEG_K", "50"))
 SEARCH_RRF_K = int(os.environ.get("SEARCH_RRF_K", "60"))
@@ -75,14 +76,42 @@ def extract_identifiers(query: str) -> list[tuple[str, str]]:
     return out
 
 
+def _meta_section_matches(meta: dict, section_id: str) -> bool:
+    sp = meta.get("section_path")
+    if not sp:
+        return False
+    if isinstance(sp, list):
+        return section_id in sp or (sp and sp[-1] == section_id)
+    return str(sp) == section_id
+
+
 def _exact_match(content: str, meta: dict, ids: list[tuple[str, str]]) -> bool:
     if not ids:
         return False
     text = content or ""
+    meta = meta or {}
+    articles = [re.search(r"\d+(?:\.\d+)*", v) for t, v in ids if t == "article"]
+    articles = [m.group(0) for m in articles if m]
+    points = [re.search(r"\d+(?:\.\d+)*", v) for t, v in ids if t == "point"]
+    points = [m.group(0) for m in points if m]
+    if articles and meta.get("article") in articles:
+        if points:
+            if meta.get("point") in points:
+                return True
+        else:
+            return True
     for typ, val in ids:
         if typ == "article":
             num = re.search(r"\d+(?:\.\d+)*", val)
             if num and meta.get("article") == num.group(0):
+                return True
+        if typ == "point":
+            num = re.search(r"\d+(?:\.\d+)*", val)
+            if num and meta.get("point") == num.group(0):
+                return True
+        if typ == "section":
+            num = re.search(r"\d+(?:\.\d+)*", val)
+            if num and _meta_section_matches(meta, num.group(0)):
                 return True
         # Границы слова в Python (не PostgreSQL \m/\M)
         pat = r"(?<!\w)" + re.escape(val) + r"(?!\w)"
@@ -105,6 +134,28 @@ def _project_filter(project: str | None) -> tuple[str, list]:
     return "", []
 
 
+def _metadata_filters(
+    *,
+    law: str | None = None,
+    doc_kind: str | None = None,
+    as_of: str | None = None,
+) -> tuple[str, list]:
+    parts: list[str] = []
+    params: list = []
+    if law:
+        parts.append(" AND a.metadata->>'law' ILIKE %s")
+        params.append(law)
+    if doc_kind:
+        parts.append(" AND a.metadata->>'doc_kind' = %s")
+        params.append(doc_kind)
+    if as_of:
+        parts.append(
+            " AND (a.metadata->>'effective_date' IS NULL OR a.metadata->>'effective_date' <= %s)"
+        )
+        params.append(as_of)
+    return "".join(parts), params
+
+
 def _fetch_base_row(cur, atom_id: int) -> dict | None:
     cur.execute(
         """
@@ -121,40 +172,58 @@ def _fetch_base_row(cur, atom_id: int) -> dict | None:
     return cur.fetchone()
 
 
-def leg_fts(cur, query: str, project: str | None, leg_k: int, include_superseded: bool):
+def leg_fts(
+    cur,
+    query: str,
+    project: str | None,
+    leg_k: int,
+    include_superseded: bool,
+    meta_sql: str = "",
+    meta_params: list | None = None,
+):
     tq = fts_query(query)
     if not tq:
         return []
     pf, pp = _project_filter(project)
     status = "" if include_superseded else " AND a.status = 'active'"
+    mp = list(meta_params or [])
     sql = f"""
         SELECT a.id, ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) AS rank
         FROM atoms a
         JOIN versions v ON a.version_id = v.id
         JOIN sources s ON a.document_id = s.id
-        WHERE a.tsv @@ to_tsquery('public.ru_en', %s){status}{pf}
+        WHERE a.tsv @@ to_tsquery('public.ru_en', %s){status}{pf}{meta_sql}
         ORDER BY rank DESC LIMIT %s
     """
-    params = [tq, tq] + pp + [leg_k]
+    params = [tq, tq] + pp + mp + [leg_k]
     cur.execute(sql, params)
     return [(r[0], float(r[1])) for r in cur.fetchall()]
 
 
-def leg_ilike(cur, query: str, project: str | None, leg_k: int, include_superseded: bool):
+def leg_ilike(
+    cur,
+    query: str,
+    project: str | None,
+    leg_k: int,
+    include_superseded: bool,
+    meta_sql: str = "",
+    meta_params: list | None = None,
+):
     terms = ili_terms(query)
     if not terms:
         return []
     pf, pp = _project_filter(project)
     status = "" if include_superseded else " AND a.status = 'active'"
+    mp = list(meta_params or [])
     conds = " OR ".join(["a.content ILIKE %s" for _ in terms])
     sql = f"""
         SELECT a.id FROM atoms a
         JOIN versions v ON a.version_id = v.id
         JOIN sources s ON a.document_id = s.id
-        WHERE ({conds}){status}{pf}
+        WHERE ({conds}){status}{pf}{meta_sql}
         ORDER BY a.id LIMIT %s
     """
-    params = [f"%{t}%" for t in terms] + pp + [leg_k]
+    params = [f"%{t}%" for t in terms] + pp + mp + [leg_k]
     cur.execute(sql, params)
     return [r[0] for r in cur.fetchall()]
 
@@ -187,6 +256,8 @@ def leg_vector(
     leg_k: int,
     include_superseded: bool,
     warnings: list[str],
+    meta_sql: str = "",
+    meta_params: list | None = None,
 ):
     model, dims = provider.space, provider.dims
     idx = _hnsw_index_name(model, dims)
@@ -198,6 +269,7 @@ def leg_vector(
 
     pf, pp = _project_filter(project)
     status = "" if include_superseded else " AND a.status = 'active'"
+    mp = list(meta_params or [])
     vec_lit = "[" + ",".join(str(float(x)) for x in qvec) + "]"
 
     count_sql = f"""
@@ -205,9 +277,9 @@ def leg_vector(
         JOIN atoms a ON a.id = e.atom_id
         JOIN versions v ON v.id = a.version_id
         JOIN sources s ON s.id = v.source_id
-        WHERE e.model = %s AND e.dims = %s{status}{pf}
+        WHERE e.model = %s AND e.dims = %s{status}{pf}{meta_sql}
     """
-    cur.execute(count_sql, [model, dims] + pp)
+    cur.execute(count_sql, [model, dims] + pp + mp)
     n_vecs = cur.fetchone()[0]
 
     if n_vecs == 0:
@@ -231,11 +303,11 @@ def leg_vector(
         JOIN atoms a ON a.id = e.atom_id
         JOIN versions v ON v.id = a.version_id
         JOIN sources s ON s.id = v.source_id
-        WHERE e.model = %s AND e.dims = %s{status}{pf}
+        WHERE e.model = %s AND e.dims = %s{status}{pf}{meta_sql}
         ORDER BY {dist_expr}
         LIMIT %s
     """
-    params = [model, dims] + pp + [leg_k]
+    params = [model, dims] + pp + mp + [leg_k]
 
     if use_exact:
         cur.execute("SET LOCAL enable_indexscan = off")
@@ -361,6 +433,9 @@ def search(
     include_superseded: bool = False,
     provider: EmbeddingProvider | None = None,
     provider_warnings: list[str] | None = None,
+    law: str | None = None,
+    doc_kind: str | None = None,
+    as_of: str | None = None,
 ) -> SearchResult:
     warnings: list[str] = list(provider_warnings or [])
     mode = (mode or os.environ.get("SEARCH_MODE", "hybrid")).lower()
@@ -382,16 +457,33 @@ def search(
     sim_map: dict[int, float] = {}
 
     leg_k = max(SEARCH_LEG_K, limit)
+    meta_sql, meta_params = _metadata_filters(law=law, doc_kind=doc_kind, as_of=as_of)
 
     if mode in ("fts", "hybrid"):
-        fts_rows = leg_fts(leg_cur, query, project or None, leg_k, include_superseded)
+        fts_rows = leg_fts(
+            leg_cur,
+            query,
+            project or None,
+            leg_k,
+            include_superseded,
+            meta_sql,
+            meta_params,
+        )
         legs["fts"] = len(fts_rows)
         for i, (aid, _) in enumerate(fts_rows, 1):
             rank_maps["fts"][aid] = i
 
     need_ilike = mode in ("fts", "hybrid") and len(rank_maps["fts"]) < limit
     if need_ilike:
-        ilike_ids = leg_ilike(leg_cur, query, project or None, leg_k, include_superseded)
+        ilike_ids = leg_ilike(
+            leg_cur,
+            query,
+            project or None,
+            leg_k,
+            include_superseded,
+            meta_sql,
+            meta_params,
+        )
         legs["ilike"] = len(ilike_ids)
         r0 = 1
         for aid in ilike_ids:
@@ -434,7 +526,16 @@ def search(
         try:
             qvec = provider.embed_query(query)
             vrows = leg_vector(
-                leg_cur, conn, qvec, provider, project or None, leg_k, include_superseded, warnings
+                leg_cur,
+                conn,
+                qvec,
+                provider,
+                project or None,
+                leg_k,
+                include_superseded,
+                warnings,
+                meta_sql,
+                meta_params,
             )
             legs["vector"] = len(vrows)
             min_sim = min_similarity_for_space(provider.space)
@@ -569,5 +670,6 @@ def hit_to_dict(h: Hit) -> dict[str, Any]:
         "similarity": h.similarity,
         "exact": h.exact,
         "match_note": h.match_note,
+        "citation": format_citation(meta, h.source_title),
         "linked": h.links,
     }

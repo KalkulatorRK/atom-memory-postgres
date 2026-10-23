@@ -7,13 +7,26 @@ import sys
 
 
 def _pg_sql_literal(value: str) -> str:
+    if "\x00" in value:
+        raise ValueError("NUL byte in SQL literal value")
     return "'" + value.replace("'", "''") + "'"
 
 
+def _validate_role(role: str) -> None:
+    if not role:
+        raise ValueError("empty role name")
+    if "\x00" in role:
+        raise ValueError("NUL byte in role name")
+    if role.lower().startswith("pg_"):
+        raise ValueError(f"reserved PostgreSQL role name: {role}")
+
+
 def render_role_password_sql(role: str, password: str) -> str:
+    _validate_role(role)
     r = _pg_sql_literal(role)
     p = _pg_sql_literal(password)
     return (
+        "SET log_statement = 'none';\n"
         "SELECT format(\n"
         "  CASE WHEN EXISTS (SELECT 1 FROM pg_roles WHERE rolname = "
         f"{r})\n"
@@ -22,6 +35,7 @@ def render_role_password_sql(role: str, password: str) -> str:
         "  END,\n"
         f"  {r}, {p}\n"
         ") \\gexec\n"
+        "RESET log_statement;\n"
     )
 
 
