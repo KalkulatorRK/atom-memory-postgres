@@ -12,7 +12,7 @@
 - MCP JSON-RPC `memory_search`: **всегда JSON-массив** по умолчанию; warnings в stderr или opt-in `include_warnings` / `ATOM_MEMORY_MCP_INCLUDE_WARNINGS=1`.
 - `vector_index_admin.sh`: SET и CREATE INDEX в одном сеансе psql; валидация `--m`, `--ef-construction`, `--mem`.
 - Откат `0004_vector_search_down.sql` идемпотентен; снимок `content_hash`/`embed_meta` — без лишнего re-embed после повторного 0004.
-- `setup_memory_db.sh`: повторный запуск пропускает `schema.sql`, если есть `atoms`; пароль роли через `set_db_role_password.py` + `MEMORY_DB_PASSWORD`.
+- `setup_memory_db.sh`: повторный запуск пропускает `schema.sql`, если есть `atoms`; пароль роли через `render_role_password_sql.py` + `MEMORY_DB_PASSWORD`.
 - CLI `--json` / `--explain` работают в режиме `--mode fts`.
 - FastMCP: восстановлены docstring инструментов; `scripts/calibrate_min_sim.py` и `docs/SECURITY.md` (ротация пароля).
 
