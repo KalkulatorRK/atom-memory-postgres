@@ -5,7 +5,7 @@ import psycopg2
 import pytest
 
 from embeddings import resolve_provider
-from search_core import _exact_match, extract_identifiers, search, search_fts_only
+from search_core import _exact_match, search, search_fts_only
 from vector_index import hnsw_index_name
 
 pytestmark = pytest.mark.db
@@ -61,15 +61,28 @@ def _seed_atom(conn, content: str):
 
 
 @pytest.mark.parametrize(
-    "query,needle",
+    "query,meta,needle",
     [
-        ("ст. 475", "475"),
-        ("ГОСТ 7512-82", "7512-82"),
-        ("12", "12"),
-        ("v11", "v11"),
+        ("ст. 475", {"article": "475", "doc_kind": "code", "law": "ГК РФ"}, "475"),
+        (
+            "ГОСТ 7512-82",
+            {"standard": "ГОСТ 7512-82", "doc_kind": "gost"},
+            "7512-82",
+        ),
+        (
+            "п. 2 ст. 475",
+            {"article": "475", "point": "2", "doc_kind": "code", "law": "ГК РФ"},
+            "пункт два",
+        ),
+        ("ст. 12", {"article": "12", "doc_kind": "code", "law": "ГК РФ"}, "12"),
+        (
+            "v11",
+            {"article": "475", "doc_kind": "code", "law": "ГК РФ", "redaction": "v11"},
+            "v11",
+        ),
     ],
 )
-def test_hybrid_identifier_exact_tier_ranks_first(conn, query, needle):
+def test_hybrid_identifier_exact_tier_ranks_first(conn, query, meta, needle):
     import uuid
 
     proj = f"pr1_rank_{uuid.uuid4().hex[:10]}"
@@ -95,8 +108,13 @@ def test_hybrid_identifier_exact_tier_ranks_first(conn, query, needle):
     )
     cur.execute(
         "INSERT INTO atoms (version_id, document_id, atom_type, ordinal, content, metadata) "
-        "VALUES (%s,%s,'text',2,%s,'{}'::jsonb) RETURNING id",
-        (vid, sid, f"статья 475 ГОСТ 7512-82 v11 номер 12 {needle}"),
+        "VALUES (%s,%s,'text',2,%s,%s::jsonb) RETURNING id",
+        (
+            vid,
+            sid,
+            f"статья 475 ГОСТ 7512-82 v11 номер 12 {needle}",
+            json.dumps(meta, ensure_ascii=False),
+        ),
     )
     target_id = cur.fetchone()[0]
     conn.commit()
@@ -112,12 +130,17 @@ def test_hybrid_identifier_exact_tier_ranks_first(conn, query, needle):
     )
     assert sr.results, f"no hits for {query!r}"
     assert sr.results[0].atom_id == target_id
-    assert sr.results[0].exact is True
+    if query in ("ГОСТ 7512-82", "v11"):
+        assert sr.results[0].exact is False
+    else:
+        assert sr.results[0].exact is True
 
 
 def test_exact_match_python_word_boundaries():
-    ids = extract_identifiers("ст. 475")
-    assert _exact_match("текст ст. 475 далее", {}, ids)
+    from search_core import parse_structured_query
+
+    sq = parse_structured_query("ст. 475")
+    assert _exact_match("текст ст. 475 далее", {"article": "475"}, sq)
 
 
 def test_hnsw_index_name_matches_migration():

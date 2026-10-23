@@ -12,6 +12,7 @@ import psycopg2
 
 from _common import fts_query, ili_terms, linked_by_atom
 from search_core import hit_to_dict, search
+from structure import format_citation
 
 
 def get_dsn_local():
@@ -96,21 +97,14 @@ def run_fts_legacy(cur, query: str, project: str, limit: int):
 
 
 def format_hybrid_hit(h) -> str:
-    page = (h.metadata or {}).get("page") or "?"
     tags = (h.metadata or {}).get("tags", [])
     mb = "+".join(h.matched_by) if h.matched_by else "?"
     tail = f" [{mb}]"
     if h.match_note:
         tail += f" ({h.match_note})"
-    art = (h.metadata or {}).get("article")
-    sec = (h.metadata or {}).get("section_path")
-    extra = ""
-    if art:
-        extra += f" ст.{art}"
-    if sec:
-        extra += f" {sec}"
+    cite = format_citation(h.metadata or {}, h.source_title)
     line = (
-        f"[{h.atom_id}] {h.source_title} v{h.version_no} стр.{page}{extra} "
+        f"[{h.atom_id}] {cite} v{h.version_no} "
         f"({h.atom_type}) {h.content[:400]}{tail}"
     )
     out = [line]
@@ -132,13 +126,24 @@ def main():
                     choices=["fts", "vector", "hybrid"])
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--explain", action="store_true")
+    ap.add_argument("--law", default="", help="фильтр metadata.law (ILIKE)")
+    ap.add_argument("--doc-kind", default="", choices=["", "code", "gost", "sdank"])
+    ap.add_argument("--as-of", default="", help="effective_date <= DATE (ISO или DD.MM.YYYY)")
     args = ap.parse_args()
 
     dsn = get_dsn_local()
     conn = psycopg2.connect(dsn)
     cur = conn.cursor()
 
-    if args.mode == "fts" and not args.json and not args.explain:
+    use_legacy_fts = (
+        args.mode == "fts"
+        and not args.json
+        and not args.explain
+        and not args.law
+        and not args.doc_kind
+        and not args.as_of
+    )
+    if use_legacy_fts:
         out = run_fts_legacy(cur, args.query, args.project, args.limit)
         cur.close()
         conn.close()
@@ -146,12 +151,16 @@ def main():
         return
 
     cur.close()
+    as_of = args.as_of or None
     sr = search(
         conn,
         args.query,
         project=args.project or None,
         limit=args.limit,
         mode=args.mode,
+        law=args.law or None,
+        doc_kind=args.doc_kind or None,
+        as_of=as_of,
     )
     for w in sr.warnings:
         print(w, file=sys.stderr)

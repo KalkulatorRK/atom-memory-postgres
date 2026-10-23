@@ -25,6 +25,10 @@ if ! [[ "$DB_NAME" =~ $ident && "$DB_USER" =~ $ident ]]; then
     echo "Имя БД и пользователя: только латиница, цифры и подчёркивание."
     exit 1
 fi
+if [[ "$DB_USER" == pg_* ]] || [[ "$DB_USER" == PG_* ]]; then
+    echo "Имя пользователя не может начинаться с pg_/PG_ (зарезервировано PostgreSQL)."
+    exit 1
+fi
 
 # DSN суперпользователя для конкретной базы (CI: ADMIN_DSN; иначе peer через postgres OS user).
 admin_psql() {
@@ -42,8 +46,12 @@ admin_psql() {
 }
 
 set_db_role_password() {
-  DB_USER="$DB_USER" MEMORY_DB_PASSWORD="$DB_PASS" python3 "$SCRIPT_DIR/render_role_password_sql.py" \
-    | admin_psql postgres -v ON_ERROR_STOP=1 -f -
+  local sql
+  sql="$(DB_USER="$DB_USER" MEMORY_DB_PASSWORD="$DB_PASS" python3 "$SCRIPT_DIR/render_role_password_sql.py")"
+  # SET LOCAL может быть недоступен CREATEROLE — не роняем setup; SCRAM уже без plaintext.
+  if ! printf '%s\n' "$sql" | admin_psql postgres -v ON_ERROR_STOP=1 -f -; then
+    return 1
+  fi
 }
 
 # postgres OS user (sudo) не читает файлы в $HOME runner — подаём SQL через stdin.
@@ -90,10 +98,10 @@ else
 fi
 
 echo "[3/4] Создание БД $DB_NAME и пользователя $DB_USER..."
+set_db_role_password
 if ! admin_psql postgres -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
   admin_psql postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${DB_NAME}\""
 fi
-set_db_role_password
 admin_psql postgres -v ON_ERROR_STOP=1 \
   -v db_name="$DB_NAME" -v db_user="$DB_USER" <<'SQL'
 SELECT format('GRANT CONNECT, TEMPORARY ON DATABASE %I TO %I', :'db_name', :'db_user') \gexec

@@ -1,6 +1,7 @@
 """Гибридный поиск: FTS + ILIKE + vector, слияние RRF."""
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from embeddings import (
     min_similarity_for_space,
     resolve_provider,
 )
+from structure import format_citation, law_ilike_pattern, parse_date_strict
 
 SEARCH_LEG_K = int(os.environ.get("SEARCH_LEG_K", "50"))
 SEARCH_RRF_K = int(os.environ.get("SEARCH_RRF_K", "60"))
@@ -52,6 +54,46 @@ class SearchResult:
     legs: dict[str, int]
 
 
+@dataclass
+class StructuredQuery:
+    standard: str | None = None
+    article: str | None = None
+    point: str | None = None
+    section: str | None = None
+    annex: str | None = None
+
+
+def parse_structured_query(query: str) -> StructuredQuery:
+    sq = StructuredQuery()
+    working = query
+    m_std = re.search(
+        r"(?:ГОСТ(?:\s*Р)?|СДАНК|СТО|ISO)\s*[-\w.]+", working, re.IGNORECASE
+    )
+    if m_std:
+        sq.standard = m_std.group(0).strip()
+        working = working[: m_std.start()] + " " + working[m_std.end() :]
+    for m in re.finditer(
+        r"(?<![\wа-яё])(?:ст\.|стать[яиюе])\s*(\d+(?:\.\d+)*)",
+        working,
+        re.IGNORECASE,
+    ):
+        sq.article = m.group(1)
+    for m in re.finditer(r"(?:п|пп)\.\s*(\d+(?:\.\d+)*)", working, re.IGNORECASE):
+        val = m.group(1)
+        if "." in val:
+            sq.section = val
+        else:
+            sq.point = val
+    m_ann = re.search(r"(?i)приложени[ея]\s+([А-ЯA-Z])", working)
+    if m_ann:
+        sq.annex = m_ann.group(1).upper()
+    if not sq.section and not sq.article and not sq.point:
+        for m in re.finditer(r"\b(\d+(?:\.\d+){1,4})\b", working):
+            sq.section = m.group(1)
+            break
+    return sq
+
+
 def extract_identifiers(query: str) -> list[tuple[str, str]]:
     """(type, value) — тип для яруса точных совпадений."""
     out: list[tuple[str, str]] = []
@@ -75,20 +117,124 @@ def extract_identifiers(query: str) -> list[tuple[str, str]]:
     return out
 
 
-def _exact_match(content: str, meta: dict, ids: list[tuple[str, str]]) -> bool:
-    if not ids:
+def _meta_section_matches(meta: dict, section_id: str) -> bool:
+    sp = meta.get("section_path")
+    if not sp:
         return False
-    text = content or ""
-    for typ, val in ids:
-        if typ == "article":
-            num = re.search(r"\d+(?:\.\d+)*", val)
-            if num and meta.get("article") == num.group(0):
-                return True
-        # Границы слова в Python (не PostgreSQL \m/\M)
-        pat = r"(?<!\w)" + re.escape(val) + r"(?!\w)"
-        if re.search(pat, text, re.IGNORECASE | re.UNICODE):
+    if isinstance(sp, list):
+        if not sp:
+            return False
+        leaf = str(sp[-1])
+        if leaf == section_id:
+            return True
+        if "." in section_id:
+            return leaf == section_id or leaf.startswith(section_id + ".")
+        if len(sp) == 1 and sp[0] == section_id:
+            return True
+        return False
+    return str(sp) == section_id
+
+
+def _meta_point_matches(meta: dict, point_id: str) -> bool:
+    if str(meta.get("point") or "") == point_id:
+        return True
+    sp = meta.get("section_path")
+    if isinstance(sp, list) and sp:
+        if len(sp) == 1 and str(sp[0]) == point_id:
+            return True
+        leaf = str(sp[-1])
+        if leaf == point_id and "." not in leaf:
             return True
     return False
+
+
+def _exact_match_structured(meta: dict, sq: StructuredQuery) -> bool:
+    meta = meta or {}
+    if sq.article and str(meta.get("article")) != sq.article:
+        return False
+    if sq.point and not _meta_point_matches(meta, sq.point):
+        return False
+    if sq.section and not _meta_section_matches(meta, sq.section):
+        return False
+    if sq.annex and str(meta.get("annex") or "").upper() != sq.annex:
+        return False
+    if sq.standard:
+        blob = " ".join(
+            str(meta.get(k) or "")
+            for k in ("standard", "law", "source_doc")
+        ).lower()
+        if sq.standard.lower() not in blob:
+            return False
+        if not (sq.article or sq.point or sq.section or sq.annex):
+            return False
+    if sq.annex or sq.article or sq.point or sq.section:
+        return True
+    return False
+
+
+def _exact_match(content: str, meta: dict, sq: StructuredQuery) -> bool:
+    if _exact_match_structured(meta, sq):
+        return True
+    return False
+
+
+def _atom_status_sql(include_superseded: bool, as_of: str | None) -> str:
+    if include_superseded or as_of:
+        return ""
+    return " AND a.status = 'active'"
+
+
+def leg_metadata_ids(
+    cur,
+    sq: StructuredQuery,
+    project: str | None,
+    leg_k: int,
+    include_superseded: bool,
+    meta_sql: str,
+    meta_params: list,
+    as_of: str | None = None,
+) -> list[int]:
+    if not any((sq.standard, sq.article, sq.point, sq.section, sq.annex)):
+        return []
+    pf, pp = _project_filter(project)
+    status = _atom_status_sql(include_superseded, as_of)
+    conds: list[str] = []
+    params: list = []
+    if sq.article:
+        conds.append("a.metadata->>'article' = %s")
+        params.append(sq.article)
+    if sq.point:
+        conds.append(
+            "(a.metadata->>'point' = %s OR a.metadata->'section_path' = %s::jsonb "
+            "OR a.metadata->'section_path'->>-1 = %s)"
+        )
+        params.extend([sq.point, json.dumps([sq.point]), sq.point])
+    if sq.section:
+        conds.append(
+            "(a.metadata->'section_path'->>-1 = %s "
+            "OR a.metadata->'section_path'->>-1 LIKE %s)"
+        )
+        params.extend([sq.section, sq.section + ".%"])
+    if sq.annex:
+        conds.append("upper(a.metadata->>'annex') = %s")
+        params.append(sq.annex.upper())
+    if sq.standard:
+        conds.append(
+            "(a.metadata->>'standard' ILIKE %s OR a.metadata->>'law' ILIKE %s OR s.title ILIKE %s)"
+        )
+        like = f"%{sq.standard.split()[0]}%"
+        params.extend([like, like, like])
+    if not conds:
+        return []
+    sql = f"""
+        SELECT a.id FROM atoms a
+        JOIN versions v ON a.version_id = v.id
+        JOIN sources s ON a.document_id = s.id
+        WHERE ({' AND '.join(conds)}){status}{pf}{meta_sql}
+        ORDER BY a.id LIMIT %s
+    """
+    cur.execute(sql, params + pp + list(meta_params) + [leg_k])
+    return [r[0] for r in cur.fetchall()]
 
 
 def rrf_score(ranks: dict[str, int], weights: dict[str, float], k: int = SEARCH_RRF_K) -> float:
@@ -103,6 +249,70 @@ def _project_filter(project: str | None) -> tuple[str, list]:
     if project:
         return " AND s.project_id IN (SELECT id FROM projects WHERE name = %s)", [project]
     return "", []
+
+
+def _resolve_as_of(as_of: str | None, warnings: list[str]) -> str | None:
+    if not as_of:
+        return None
+    d = parse_date_strict(as_of)
+    if not d:
+        warnings.append(f"фильтр --as-of игнорирован: неверная дата «{as_of}»")
+        return None
+    return d.isoformat()
+
+
+def _metadata_filters(
+    *,
+    law: str | None = None,
+    doc_kind: str | None = None,
+    as_of: str | None = None,
+) -> tuple[str, list]:
+    parts: list[str] = []
+    params: list = []
+    lp = law_ilike_pattern(law)
+    if lp:
+        parts.append(
+            " AND (a.metadata->>'law' ILIKE %s OR a.metadata->>'standard' ILIKE %s)"
+        )
+        params.extend([lp, lp])
+    if doc_kind:
+        parts.append(" AND a.metadata->>'doc_kind' = %s")
+        params.append(doc_kind)
+    if as_of:
+        parts.append(
+            """
+            AND (
+              (
+                NOT EXISTS (
+                  SELECT 1 FROM versions vx
+                  JOIN atoms ax ON ax.version_id = vx.id
+                  WHERE vx.source_id = s.id
+                    AND COALESCE(ax.metadata->>'effective_date', '') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                )
+                AND a.status = 'active'
+              )
+              OR v.id = (
+                SELECT v2.id FROM versions v2
+                WHERE v2.source_id = s.id
+                  AND EXISTS (
+                    SELECT 1 FROM atoms a2
+                    WHERE a2.version_id = v2.id
+                      AND (a2.metadata->>'effective_date') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                      AND (a2.metadata->>'effective_date')::date <= %s::date
+                  )
+                ORDER BY (
+                  SELECT max((a3.metadata->>'effective_date')::date)
+                  FROM atoms a3
+                  WHERE a3.version_id = v2.id
+                    AND (a3.metadata->>'effective_date') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                ) DESC NULLS LAST, v2.version_no DESC
+                LIMIT 1
+              )
+            )
+            """
+        )
+        params.append(as_of)
+    return "".join(parts), params
 
 
 def _fetch_base_row(cur, atom_id: int) -> dict | None:
@@ -121,40 +331,60 @@ def _fetch_base_row(cur, atom_id: int) -> dict | None:
     return cur.fetchone()
 
 
-def leg_fts(cur, query: str, project: str | None, leg_k: int, include_superseded: bool):
+def leg_fts(
+    cur,
+    query: str,
+    project: str | None,
+    leg_k: int,
+    include_superseded: bool,
+    meta_sql: str = "",
+    meta_params: list | None = None,
+    as_of: str | None = None,
+):
     tq = fts_query(query)
     if not tq:
         return []
     pf, pp = _project_filter(project)
-    status = "" if include_superseded else " AND a.status = 'active'"
+    status = _atom_status_sql(include_superseded, as_of)
+    mp = list(meta_params or [])
     sql = f"""
         SELECT a.id, ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) AS rank
         FROM atoms a
         JOIN versions v ON a.version_id = v.id
         JOIN sources s ON a.document_id = s.id
-        WHERE a.tsv @@ to_tsquery('public.ru_en', %s){status}{pf}
+        WHERE a.tsv @@ to_tsquery('public.ru_en', %s){status}{pf}{meta_sql}
         ORDER BY rank DESC LIMIT %s
     """
-    params = [tq, tq] + pp + [leg_k]
+    params = [tq, tq] + pp + mp + [leg_k]
     cur.execute(sql, params)
     return [(r[0], float(r[1])) for r in cur.fetchall()]
 
 
-def leg_ilike(cur, query: str, project: str | None, leg_k: int, include_superseded: bool):
+def leg_ilike(
+    cur,
+    query: str,
+    project: str | None,
+    leg_k: int,
+    include_superseded: bool,
+    meta_sql: str = "",
+    meta_params: list | None = None,
+    as_of: str | None = None,
+):
     terms = ili_terms(query)
     if not terms:
         return []
     pf, pp = _project_filter(project)
-    status = "" if include_superseded else " AND a.status = 'active'"
+    status = _atom_status_sql(include_superseded, as_of)
+    mp = list(meta_params or [])
     conds = " OR ".join(["a.content ILIKE %s" for _ in terms])
     sql = f"""
         SELECT a.id FROM atoms a
         JOIN versions v ON a.version_id = v.id
         JOIN sources s ON a.document_id = s.id
-        WHERE ({conds}){status}{pf}
+        WHERE ({conds}){status}{pf}{meta_sql}
         ORDER BY a.id LIMIT %s
     """
-    params = [f"%{t}%" for t in terms] + pp + [leg_k]
+    params = [f"%{t}%" for t in terms] + pp + mp + [leg_k]
     cur.execute(sql, params)
     return [r[0] for r in cur.fetchall()]
 
@@ -187,6 +417,9 @@ def leg_vector(
     leg_k: int,
     include_superseded: bool,
     warnings: list[str],
+    meta_sql: str = "",
+    meta_params: list | None = None,
+    as_of: str | None = None,
 ):
     model, dims = provider.space, provider.dims
     idx = _hnsw_index_name(model, dims)
@@ -197,7 +430,8 @@ def leg_vector(
     has_idx = cur.fetchone() is not None
 
     pf, pp = _project_filter(project)
-    status = "" if include_superseded else " AND a.status = 'active'"
+    status = _atom_status_sql(include_superseded, as_of)
+    mp = list(meta_params or [])
     vec_lit = "[" + ",".join(str(float(x)) for x in qvec) + "]"
 
     count_sql = f"""
@@ -205,9 +439,9 @@ def leg_vector(
         JOIN atoms a ON a.id = e.atom_id
         JOIN versions v ON v.id = a.version_id
         JOIN sources s ON s.id = v.source_id
-        WHERE e.model = %s AND e.dims = %s{status}{pf}
+        WHERE e.model = %s AND e.dims = %s{status}{pf}{meta_sql}
     """
-    cur.execute(count_sql, [model, dims] + pp)
+    cur.execute(count_sql, [model, dims] + pp + mp)
     n_vecs = cur.fetchone()[0]
 
     if n_vecs == 0:
@@ -231,11 +465,11 @@ def leg_vector(
         JOIN atoms a ON a.id = e.atom_id
         JOIN versions v ON v.id = a.version_id
         JOIN sources s ON s.id = v.source_id
-        WHERE e.model = %s AND e.dims = %s{status}{pf}
+        WHERE e.model = %s AND e.dims = %s{status}{pf}{meta_sql}
         ORDER BY {dist_expr}
         LIMIT %s
     """
-    params = [model, dims] + pp + [leg_k]
+    params = [model, dims] + pp + mp + [leg_k]
 
     if use_exact:
         cur.execute("SET LOCAL enable_indexscan = off")
@@ -287,36 +521,45 @@ def search_fts_only(
     *,
     project: str | None = None,
     limit: int = 10,
+    law: str | None = None,
+    doc_kind: str | None = None,
+    as_of: str | None = None,
+    warnings: list[str] | None = None,
 ) -> SearchResult:
-    """Только FTS + ILIKE, порядок как в v1.7 (без RRF)."""
+    """Только FTS + ILIKE; фильтры и metadata-leg как в hybrid."""
+    warnings = list(warnings or [])
+    as_of = _resolve_as_of(as_of, warnings)
+    meta_sql, meta_params = _metadata_filters(law=law, doc_kind=doc_kind, as_of=as_of)
+    sq = parse_structured_query(query)
     leg_cur = conn.cursor()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     ordered_ids: list[int] = []
+    for aid in leg_metadata_ids(
+        leg_cur, sq, project, limit, False, meta_sql, meta_params, as_of=as_of
+    ):
+        ordered_ids.append(aid)
     tq = fts_query(query)
     if tq:
-        pf, pp = _project_filter(project)
-        sql = f"""
-            SELECT a.id FROM atoms a
-            JOIN versions v ON a.version_id = v.id
-            JOIN sources s ON a.document_id = s.id
-            WHERE a.status = 'active'
-              AND a.tsv @@ to_tsquery('public.ru_en', %s){pf}
-            ORDER BY ts_rank(a.tsv, to_tsquery('public.ru_en', %s)) DESC LIMIT %s
-        """
-        leg_cur.execute(sql, [tq, tq] + pp + [limit])
-        ordered_ids = [r[0] for r in leg_cur.fetchall()]
+        for aid, _ in leg_fts(
+            leg_cur, query, project, limit, False, meta_sql, meta_params, as_of=as_of
+        ):
+            if aid not in ordered_ids and len(ordered_ids) < limit:
+                ordered_ids.append(aid)
     if len(ordered_ids) < limit:
         seen = set(ordered_ids)
-        for aid in leg_ilike(leg_cur, query, project, limit, False):
+        for aid in leg_ilike(
+            leg_cur, query, project, limit, False, meta_sql, meta_params, as_of=as_of
+        ):
             if aid not in seen and len(ordered_ids) < limit:
                 ordered_ids.append(aid)
                 seen.add(aid)
     hits = []
-    for aid in ordered_ids:
+    for aid in ordered_ids[:limit]:
         row = _fetch_base_row(cur, aid)
         if not row:
             continue
         meta = row["metadata"] or {}
+        exact = _exact_match(row["content"], meta, sq)
         hits.append(
             Hit(
                 atom_id=aid,
@@ -329,8 +572,13 @@ def search_fts_only(
                 matched_by=["fts"] if tq else ["ilike"],
                 ranks={},
                 score=0.0,
+                exact=exact,
             )
         )
+    if sq.article or sq.point or sq.section or sq.annex:
+        exact_tier = [h for h in hits if h.exact]
+        other = [h for h in hits if not h.exact]
+        hits = exact_tier + other
     if hits:
         lcur = conn.cursor()
         lm = linked_by_atom(lcur, [h.atom_id for h in hits])
@@ -347,7 +595,12 @@ def search_fts_only(
         lcur.close()
     leg_cur.close()
     cur.close()
-    return SearchResult(results=hits, warnings=[], mode_used="fts", legs={})
+    if not hits and as_of:
+        warnings.append(
+            "нет редакции документов на указанную дату (--as-of); "
+            "попробуйте другую дату или уберите фильтр"
+        )
+    return SearchResult(results=hits[:limit], warnings=warnings, mode_used="fts", legs={})
 
 
 def search(
@@ -361,14 +614,32 @@ def search(
     include_superseded: bool = False,
     provider: EmbeddingProvider | None = None,
     provider_warnings: list[str] | None = None,
+    law: str | None = None,
+    doc_kind: str | None = None,
+    as_of: str | None = None,
 ) -> SearchResult:
     warnings: list[str] = list(provider_warnings or [])
     mode = (mode or os.environ.get("SEARCH_MODE", "hybrid")).lower()
     if mode not in ("fts", "vector", "hybrid"):
         raise ValueError(f"неизвестный mode: {mode}")
 
+    as_of_resolved = _resolve_as_of(as_of, warnings)
+    meta_sql, meta_params = _metadata_filters(
+        law=law, doc_kind=doc_kind, as_of=as_of_resolved
+    )
+    sq = parse_structured_query(query)
+
     if mode == "fts":
-        return search_fts_only(conn, query, project=project, limit=limit)
+        return search_fts_only(
+            conn,
+            query,
+            project=project,
+            limit=limit,
+            law=law,
+            doc_kind=doc_kind,
+            as_of=as_of_resolved,
+            warnings=warnings,
+        )
 
     if provider is None and mode in ("hybrid", "vector"):
         provider, pw = resolve_provider()
@@ -378,20 +649,56 @@ def search(
     leg_cur = conn.cursor()
     cur = conn.cursor(cursor_factory=RealDictCursor)
     legs: dict[str, int] = {}
-    rank_maps: dict[str, dict[int, int]] = {"fts": {}, "ilike": {}, "vector": {}}
+    rank_maps: dict[str, dict[int, int]] = {
+        "fts": {},
+        "ilike": {},
+        "vector": {},
+        "meta": {},
+    }
     sim_map: dict[int, float] = {}
 
     leg_k = max(SEARCH_LEG_K, limit)
 
+    meta_ids = leg_metadata_ids(
+        leg_cur,
+        sq,
+        project or None,
+        leg_k,
+        include_superseded,
+        meta_sql,
+        meta_params,
+        as_of=as_of_resolved,
+    )
+    for i, aid in enumerate(meta_ids, 1):
+        rank_maps.setdefault("meta", {})[aid] = i
+
     if mode in ("fts", "hybrid"):
-        fts_rows = leg_fts(leg_cur, query, project or None, leg_k, include_superseded)
+        fts_rows = leg_fts(
+            leg_cur,
+            query,
+            project or None,
+            leg_k,
+            include_superseded,
+            meta_sql,
+            meta_params,
+            as_of=as_of_resolved,
+        )
         legs["fts"] = len(fts_rows)
         for i, (aid, _) in enumerate(fts_rows, 1):
             rank_maps["fts"][aid] = i
 
     need_ilike = mode in ("fts", "hybrid") and len(rank_maps["fts"]) < limit
     if need_ilike:
-        ilike_ids = leg_ilike(leg_cur, query, project or None, leg_k, include_superseded)
+        ilike_ids = leg_ilike(
+            leg_cur,
+            query,
+            project or None,
+            leg_k,
+            include_superseded,
+            meta_sql,
+            meta_params,
+            as_of=as_of_resolved,
+        )
         legs["ilike"] = len(ilike_ids)
         r0 = 1
         for aid in ilike_ids:
@@ -434,7 +741,17 @@ def search(
         try:
             qvec = provider.embed_query(query)
             vrows = leg_vector(
-                leg_cur, conn, qvec, provider, project or None, leg_k, include_superseded, warnings
+                leg_cur,
+                conn,
+                qvec,
+                provider,
+                project or None,
+                leg_k,
+                include_superseded,
+                warnings,
+                meta_sql,
+                meta_params,
+                as_of=as_of_resolved,
             )
             legs["vector"] = len(vrows)
             min_sim = min_similarity_for_space(provider.space)
@@ -458,16 +775,25 @@ def search(
         cur.close()
         return SearchResult(results=[], warnings=warnings, mode_used="vector", legs=legs)
 
-    all_ids = set(rank_maps["fts"]) | set(rank_maps["ilike"]) | set(rank_maps["vector"])
-    weights = {"fts": SEARCH_W_FTS, "ilike": SEARCH_W_ILIKE, "vector": SEARCH_W_VEC}
+    all_ids = (
+        set(rank_maps["fts"])
+        | set(rank_maps["ilike"])
+        | set(rank_maps["vector"])
+        | set(rank_maps.get("meta", {}))
+    )
+    weights = {
+        "fts": SEARCH_W_FTS,
+        "ilike": SEARCH_W_ILIKE,
+        "vector": SEARCH_W_VEC,
+        "meta": SEARCH_W_FTS,
+    }
     scored: list[tuple[float, int, Hit]] = []
-    identifiers = extract_identifiers(query)
 
     for aid in all_ids:
         ranks = {}
         matched = []
-        for leg in ("fts", "ilike", "vector"):
-            if aid in rank_maps[leg]:
+        for leg in ("meta", "fts", "ilike", "vector"):
+            if aid in rank_maps.get(leg, {}):
                 ranks[leg] = rank_maps[leg][aid]
                 matched.append(leg)
         if not ranks:
@@ -479,7 +805,7 @@ def search(
         if atom_types and row["atom_type"] not in atom_types:
             continue
         meta = row["metadata"] or {}
-        exact = _exact_match(row["content"], meta, identifiers)
+        exact = _exact_match(row["content"], meta, sq)
         note = None
         if matched == ["vector"]:
             note = "семантическое совпадение — проверьте формулировку по цитате"
@@ -504,11 +830,11 @@ def search(
     scored.sort(key=lambda x: (-x[0], x[1], x[2].atom_id))
     hits = [h for _, _, h in scored]
 
-    if identifiers:
+    if sq.article or sq.point or sq.section or sq.annex:
         exact_tier = [h for h in hits if h.exact]
         other = [h for h in hits if not h.exact]
         exact_tier.sort(key=lambda h: (-h.score, h.ranks.get("fts", 10**9), h.atom_id))
-        other.sort(key=lambda h: (-h.score, h.ranks.get("fts", 10**9), h.atom_id))
+        other.sort(key=lambda h: (-h.ranks.get("meta", 10**9), -h.score, h.atom_id))
         hits = exact_tier + other
 
     hits = _dedupe_content(hits)[:limit]
@@ -536,6 +862,17 @@ def search(
 
     leg_cur.close()
     cur.close()
+    if not hits and as_of_resolved:
+        warnings = [
+            w
+            for w in warnings
+            if "в базе нет векторов" not in w and "векторная ветка недоступна" not in w
+        ]
+        if not any("нет редакции" in w for w in warnings):
+            warnings.append(
+                "нет редакции документов на указанную дату (--as-of); "
+                "попробуйте другую дату или уберите фильтр"
+            )
     mode_used = mode
     if mode == "hybrid" and not vector_ok and provider is None:
         mode_used = "fts"
@@ -569,5 +906,6 @@ def hit_to_dict(h: Hit) -> dict[str, Any]:
         "similarity": h.similarity,
         "exact": h.exact,
         "match_note": h.match_note,
+        "citation": format_citation(meta, h.source_title),
         "linked": h.links,
     }

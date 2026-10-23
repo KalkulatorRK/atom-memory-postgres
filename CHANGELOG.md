@@ -1,5 +1,12 @@
 # Журнал изменений
 
+## 1.10.0
+
+- **VS-14:** модуль `scripts/structure.py` — структурная нарезка кодексов и ГОСТ/СДАНК (`--doc-kind auto|code|gost|sdank|none`); жёсткие границы статьи/пункта/раздела; колонтитулы не становятся заголовками.
+- **VS-15:** метаданные `law`, `article`, `point`, `section_path`, `redaction`, `effective_date`; параметры импорта `--redaction`, `--effective-date`; формат цитаты в CLI/MCP JSON; фильтры поиска `--law`, `--doc-kind`, `--as-of`.
+- **Security:** отклонение имён ролей `pg_*` и NUL в `render_role_password_sql.py`; `SET log_statement = none` на сеанс CREATE/ALTER ROLE; проверка в setup.
+- **Note:** `embed_atoms.py --prune-superseded` удаляет эмбеддинги superseded-версий; `--as-of` в режиме `vector` по старым редакциям может ничего не найти без повторного embed.
+
 ## 1.9.1
 
 - **Fix:** `setup_memory_db.sh` без `ADMIN_DSN` снова создаёт роль через `admin_psql` + `render_role_password_sql.py` (stdlib), без psycopg2 от root.

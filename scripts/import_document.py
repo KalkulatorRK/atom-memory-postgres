@@ -11,6 +11,7 @@ import argparse
 import hashlib
 
 from _common import normalize_table_no, normalize_fig_no, __version__
+from structure import DocImportOptions, prepare_for_import, structure_split
 import json
 import os
 import re
@@ -90,26 +91,120 @@ def pdf_to_text(pdf_path: str) -> str:
         f"<!-- страница {n} -->\n{t}" for n, t in pdf_to_pages(pdf_path) if t.strip())
 
 
+def _normalize_is_numbered_heading(
+    s: str, prev_line: str = "", *, prev_was_structure_heading: bool = False
+) -> bool:
+    from structure_headings import StructureLineState, accept_code_point_line
+
+    if len(s) >= 120 or not s or not s[0].isdigit():
+        return False
+    if re.match(r"^\d+\s+Федерального\s+зак", s, re.IGNORECASE):
+        return False
+    if re.match(r"^\d{1,2}\.\d{1,2}\.\d{2,4}\b", s):
+        return False
+    ls = StructureLineState(
+        prev_line=prev_line,
+        at_doc_start=not prev_line.strip(),
+        prev_was_structure_heading=prev_was_structure_heading,
+    )
+    if accept_code_point_line(s, ls)[0]:
+        return True
+    m = re.match(r"^(\d+(?:\.\d+)*)\s+(\S)", s)
+    if not m:
+        return False
+    first_word = m.group(2)
+    return bool(re.match(r"^[A-ZА-ЯЁ«\"(0-9]", first_word))
+
+
 def normalize_text(md: str) -> str:
     """Склейка переносов строк внутри абзацев (PDF-колонки)."""
+    from structure_headings import (
+        RE_ARTICLE_BARE,
+        is_paren_boundary_line,
+        normalize_prev_for_point,
+    )
+
     lines = md.split('\n')
     out = []
     buffer = []
+    prev_raw = ""
+    merge_after_banner = False
+    in_title_block = True
     for line in lines:
         s = line.strip()
         if not s:
             if buffer:
                 out.append(' '.join(buffer))
                 buffer = []
+            prev_raw = ""
             continue
+        if RE_ARTICLE_BARE.match(s):
+            if buffer:
+                out.append(' '.join(buffer))
+                buffer = []
+            out.append(s)
+            prev_raw = s
+            continue
+        from structure_headings import (
+            is_code_structure_boundary_line,
+            is_running_header_line,
+        )
+
+        if in_title_block and (
+            re.match(r"^(?:Статья|СТАТЬЯ)\s+\d", s)
+            or is_code_structure_boundary_line(s)
+            or _normalize_is_numbered_heading(s, "", prev_was_structure_heading=False)
+        ):
+            in_title_block = False
+        if is_running_header_line(s, skip_title_block=in_title_block):
+            if buffer:
+                out.append(' '.join(buffer))
+                buffer = []
+            out.append(s)
+            merge_after_banner = True
+            continue
+        if merge_after_banner and out:
+            from structure_headings import is_code_structure_boundary_line
+
+            pre_idx = len(out) - 2
+            while pre_idx >= 0 and (
+                is_running_header_line(
+                    out[pre_idx], skip_title_block=False
+                )
+                or out[pre_idx].startswith('<!--')
+            ):
+                pre_idx -= 1
+            if pre_idx >= 0 and not (
+                s.startswith('<!--')
+                or re.match(r'^(?:Статья|СТАТЬЯ)\s+\d', s)
+                or is_code_structure_boundary_line(s)
+                or is_paren_boundary_line(s)
+                or RE_ARTICLE_BARE.match(s)
+                or _normalize_is_numbered_heading(
+                    s, out[pre_idx], prev_was_structure_heading=False
+                )
+            ):
+                out[pre_idx] = out[pre_idx] + ' ' + s
+                merge_after_banner = False
+                continue
+            merge_after_banner = False
+        prev_line, prev_was = normalize_prev_for_point(buffer, prev_raw)
+        heading_prev = ' '.join(buffer) if buffer else prev_line
+
         is_new_block = (
             s.startswith('<!--') or s.startswith('#') or s.startswith('- ') or
             s.startswith('* ') or s.startswith('|') or
-            len(s) < 120 and (s[0].isdigit() or
-                s.startswith(('Приложение', 'ГОСТ', 'Таблица', 'Примечание', 'ПРИЛОЖЕНИЕ')))
+            re.match(r'^(?:Статья|СТАТЬЯ)\s+\d', s) or
+            is_code_structure_boundary_line(s) or
+            is_paren_boundary_line(s) or
+            _normalize_is_numbered_heading(
+                s, heading_prev, prev_was_structure_heading=prev_was
+            ) or
+            s.startswith(('Приложение', 'ГОСТ', 'Таблица', 'Примечание', 'ПРИЛОЖЕНИЕ'))
         )
         if is_new_block and buffer:
             out.append(' '.join(buffer))
+            prev_raw = buffer[-1] if buffer else prev_raw
             buffer = []
         buffer.append(s)
     if buffer:
@@ -298,7 +393,17 @@ def quality_gate(atoms):
         content = a["content"].strip()
         # Мусор: без букв, слишком короткий
         letters = re.findall(r'[А-Яа-яA-Za-z]', content)
-        if len(content) < 30 or len(letters) < 10:
+        sm = a.get("structure_meta") or {}
+        structured = bool(
+            sm.get("article")
+            or sm.get("chapter")
+            or sm.get("section_path")
+            or sm.get("point")
+            or sm.get("annex")
+        )
+        min_len = 8 if structured else 30
+        min_letters = 4 if structured else 10
+        if len(content) < min_len or len(letters) < min_letters:
             dropped += 1
             continue
         marks = re.findall(r'<!-- страница (\d+) -->', content)
@@ -308,6 +413,37 @@ def quality_gate(atoms):
         a["content"] = content
         clean.append(a)
     return clean, dropped
+
+
+STRUCTURE_META_KEYS = (
+    "doc_kind",
+    "standard",
+    "law",
+    "chapter",
+    "article",
+    "article_title",
+    "point",
+    "subpoint",
+    "section_path",
+    "annex",
+    "redaction",
+    "effective_date",
+    "redaction_source",
+)
+
+
+def _hint_to_metadata(atom: dict) -> dict:
+    hint = atom.get("metadata_hint") or {}
+    sm = atom.get("structure_meta") or {}
+    out = {}
+    for k in STRUCTURE_META_KEYS:
+        if k in hint and hint[k] is not None:
+            out[k] = hint[k]
+        elif k in sm and sm[k] is not None:
+            out[k] = sm[k]
+    if atom.get("page") and "page" not in out:
+        out["page"] = atom.get("page")
+    return out
 
 
 def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
@@ -329,7 +465,8 @@ def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
         for atom in atoms_batch:
             enriched.append({**atom, "metadata": {
                 "tags": [], "entities": [], "summary": atom["content"][:80],
-                "atom_type": atom["atom_type"], "source_doc": doc_title}})
+                "atom_type": atom["atom_type"], "source_doc": doc_title,
+                **_hint_to_metadata(atom)}})
         return enriched
 
     items = []
@@ -401,12 +538,14 @@ def enrich_batch(atoms_batch, doc_title="ГОСТ", prev_tail=""):
                 "atom_type": meta.get("atom_type", atom["atom_type"]),
                 "refs": meta.get("refs", []),
                 **({"page": atom.get("page")} if atom.get("page") else {}),
-                "source_doc": doc_title}})
+                "source_doc": doc_title,
+                **_hint_to_metadata(atom)}})
     else:
         for atom in atoms_batch:
             enriched.append({**atom, "metadata": {
                 "tags": [], "entities": [], "summary": atom["content"][:80],
-                "atom_type": atom["atom_type"], "refs": [], "source_doc": doc_title}})
+                "atom_type": atom["atom_type"], "refs": [], "source_doc": doc_title,
+                **_hint_to_metadata(atom)}})
     return enriched
 
 
@@ -433,35 +572,72 @@ def _existing_source(pdf_path):
     return {"project": row[0], "sha": row[1], "same": row[1] == sha}
 
 
-def import_doc(pdf_path, project_name):
+def import_doc(
+    pdf_path,
+    project_name,
+    *,
+    doc_kind: str = "auto",
+    redaction: str | None = None,
+    effective_date: str | None = None,
+):
     t0 = time.time()
     existing = _existing_source(pdf_path)
     if existing and existing["project"] != project_name:
         raise SystemExit(
             f"Файл уже импортирован в проект '{existing['project']}'. "
             f"Один файл не может лежать в двух проектах (location уникален).")
-    if existing and existing["same"]:
+    if existing and existing["same"] and doc_kind == "auto":
         print("      Без изменений (sha совпал), импорт пропущен")
         return 0, 0
     print("[1/4] Конвертация PDF → текст...")
-    md = pdf_to_text(pdf_path)
-    md = normalize_text(md)
+    raw_md = pdf_to_text(pdf_path)
+    md = normalize_text(raw_md)
+    doc_title = os.path.basename(pdf_path)
+    imp_opts = DocImportOptions(
+        doc_kind=doc_kind,
+        redaction=redaction,
+        effective_date=effective_date,
+        source_title=doc_title,
+    )
+    md, struct_ctx, page_map = prepare_for_import(md, imp_opts, meta_source=raw_md)
     print(f"      Текст: {len(md)} символов, {time.time()-t0:.0f} сек")
+    if struct_ctx:
+        print(f"      Структурный профиль: {struct_ctx.doc_kind}")
 
     print("[1а] Таблицы и изображения...")
     tables, images = extract_tables_images(pdf_path)
     print(f"      Таблиц: {len(tables)}, изображений: {len(images)}")
 
     print("[2/4] Умная резка по предложениям + quality gate...")
-    text_atoms = smart_split(md)
+    if struct_ctx:
+        text_atoms = structure_split(
+            md, struct_ctx, chunk_max=CHUNK_MAX, chunk_min=CHUNK_MIN
+        )
+        if not text_atoms:
+            print(
+                "      ⚠ структурная нарезка не дала атомов — fallback на smart_split",
+                file=sys.stderr,
+            )
+            struct_ctx = None
+            text_atoms = smart_split(md)
+    else:
+        text_atoms = smart_split(md)
     text_atoms, dropped = quality_gate(text_atoms)
     print(f"      Текст-атомов: {len(text_atoms)} (отброшено мусора: {dropped})")
+    if not text_atoms and not tables and not images:
+        raise SystemExit(
+            "Импорт не создал ни одного атома: проверьте --doc-kind или содержимое PDF."
+        )
 
     # Собираем все атомы: таблицы и изображения ПЕРВЫМИ (не режутся)
     all_atoms = []
     for t in tables:
         t["ordinal"] = len(all_atoms)
-        t["metadata_hint"] = {"table_no": t.get("table_no"), "title": t.get("title"), "page": t.get("page")}
+        hint = {"table_no": t.get("table_no"), "title": t.get("title"), "page": t.get("page")}
+        pg = t.get("page")
+        if pg and page_map.get(pg):
+            hint.update({k: v for k, v in page_map[pg].items() if k != "page"})
+        t["metadata_hint"] = hint
         all_atoms.append(t)
     for im in images:
         im["ordinal"] = len(all_atoms)
@@ -469,14 +645,15 @@ def import_doc(pdf_path, project_name):
         all_atoms.append(im)
     for a in text_atoms:
         a["ordinal"] = len(all_atoms)
-        a["metadata_hint"] = {"page": a.get("page")}
+        hint = {"page": a.get("page")}
+        hint.update(a.get("structure_meta") or {})
+        a["metadata_hint"] = hint
         all_atoms.append(a)
 
     print(f"      Всего атомов: {len(all_atoms)}")
 
     print("[3/4] Обогащение DeepSeek (параллельно, только текст-атомы)...")
     enriched = []
-    doc_title = os.path.basename(pdf_path)
 
     # Таблицы и изображения: метаданные уже дал код (table_no/fig_no/file_path)
     # НЕ отправляем их в LLM (принцип разумности — экономия 36% вызовов, $0)
@@ -553,12 +730,27 @@ def import_doc(pdf_path, project_name):
     cur.execute("SELECT id, content_sha FROM sources WHERE location = %s", (pdf_path,))
     row = cur.fetchone()
     if row and row[1] == sha:
-        # Файл не изменился — новую версию не плодим, атомы не трогаем.
-        conn.rollback()
-        cur.close()
-        conn.close()
-        print("      Без изменений (sha совпал), импорт пропущен")
-        return 0, 0
+        source_id_tmp = row[0]
+        cur.execute(
+            "SELECT a.metadata->>'doc_kind' FROM atoms a "
+            "JOIN versions v ON v.id = a.version_id "
+            "WHERE v.source_id = %s AND a.status = 'active' "
+            "AND a.metadata ? 'doc_kind' ORDER BY v.version_no DESC, a.id LIMIT 1",
+            (source_id_tmp,),
+        )
+        last_kind = cur.fetchone()
+        last_kind = last_kind[0] if last_kind else None
+        want_kind = None if doc_kind == "none" else (struct_ctx.doc_kind if struct_ctx else None)
+        if doc_kind == "auto" or want_kind == last_kind:
+            conn.rollback()
+            cur.close()
+            conn.close()
+            print("      Без изменений (sha совпал), импорт пропущен")
+            return 0, 0
+        print(
+            f"      sha совпал, но --doc-kind изменился ({last_kind!r} → {want_kind!r}) — новая версия",
+            file=sys.stderr,
+        )
     if row:
         source_id = row[0]
         cur.execute("UPDATE sources SET content_sha = %s, content_size = %s WHERE id = %s",
@@ -597,6 +789,9 @@ def import_doc(pdf_path, project_name):
             meta["page"] = hint["page"]
         if hint.get("caption"):
             meta["caption"] = hint["caption"]
+        for k in STRUCTURE_META_KEYS:
+            if hint.get(k) is not None and k not in meta:
+                meta[k] = hint[k]
 
         cur.execute(
             "INSERT INTO atoms (version_id, document_id, atom_type, ordinal, content, metadata) "
@@ -656,6 +851,7 @@ def import_doc(pdf_path, project_name):
         "INSERT INTO journal (op_type, details) VALUES ('import', %s::jsonb)",
         (json.dumps({"source_id": source_id, "version_id": version_id,
                      "version_no": version_no, "atoms": len(enriched),
+                     "doc_kind": struct_ctx.doc_kind if struct_ctx else None,
                      "file": os.path.basename(pdf_path)}, ensure_ascii=False),))
     conn.commit()
     cur.close()
@@ -686,7 +882,8 @@ def import_doc(pdf_path, project_name):
                 file=sys.stderr,
             )
 
-    return len(enriched), links
+    n_text = len(enriched)
+    return n_text, links
 
 
 if __name__ == "__main__":
@@ -694,8 +891,22 @@ if __name__ == "__main__":
     parser.add_argument("--file", required=True)
     parser.add_argument("--project", default="default")
     parser.add_argument("--no-embed", action="store_true", help="не считать эмбеддинги после импорта")
+    parser.add_argument(
+        "--doc-kind",
+        default="auto",
+        choices=["auto", "code", "gost", "sdank", "none"],
+        help="структурная нарезка: кодекс, ГОСТ/СДАНК или обычный PDF (none/auto)",
+    )
+    parser.add_argument("--redaction", default="", help="редакция документа (перекрывает автоизвлечение)")
+    parser.add_argument("--effective-date", default="", help="дата вступления в силу (ISO или DD.MM.YYYY)")
     args = parser.parse_args()
     if args.no_embed:
         import_doc._no_embed = True
-    n_atoms, n_links = import_doc(args.file, args.project)
+    n_atoms, n_links = import_doc(
+        args.file,
+        args.project,
+        doc_kind=args.doc_kind,
+        redaction=args.redaction or None,
+        effective_date=args.effective_date or None,
+    )
     print(f"\n✅ Импортировано атомов: {n_atoms}, связей: {n_links}")
