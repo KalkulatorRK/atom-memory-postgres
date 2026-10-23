@@ -70,11 +70,19 @@ RE_PAREN_BOUNDARY = re.compile(
 )
 RE_FZ_WRAP_LINE = re.compile(r"^\d+\s+Федерального\s+зак", re.IGNORECASE)
 RE_REPEALED_TAIL = re.compile(r"(?i)утратил")
+RE_REPEALED_HEADING_END = re.compile(r"(?i)утратил(?:ла|ли)?\s+силу\.?\s*$")
+RE_REPEALED_HEADING_START = re.compile(
+    r"^(?:Статья|СТАТЬЯ|Статьи|СТАТЬИ)\s+\d"
+)
 RE_ARTICLES_RANGE = re.compile(
     r"(?i)статьи\s+(\d+(?:\.\d+)*)\s*[-–—]\s*(\d+(?:\.\d+)*)"
 )
 RE_ARTICLE_NUM_IN_LINE = re.compile(
     r"(?i)(?:статьи|статья|СТАТЬЯ)\s+(\d+(?:\.\d+)*)"
+)
+RE_CHAPTER_NUMBER = re.compile(
+    r"^(?:Глава|ГЛАВА)\s+(\d+(?:\.\d+)*)",
+    re.IGNORECASE,
 )
 
 
@@ -88,6 +96,7 @@ class ArticleHeadingState:
     false_forward_anchor: tuple[int, ...] | None = None
     false_forward_spurious: tuple[int, ...] | None = None
     allow_large_forward: bool = False
+    chapter_article_prefix: tuple[int, ...] | None = None
 
 
 @dataclass
@@ -120,12 +129,52 @@ def article_number_tuple(raw: str) -> tuple[int, ...] | None:
         return None
 
 
+def is_repealed_range_heading_line(s: str) -> bool:
+    """Заголовок-якорь: строка целиком «Статья/Статьи N… … утратили силу»."""
+    s = s.strip()
+    if not s or not RE_REPEALED_HEADING_START.match(s):
+        return False
+    if not RE_REPEALED_HEADING_END.search(s):
+        return False
+    return not is_repealed_article_heading(s)
+
+
+def chapter_heading_article_prefix(s: str) -> tuple[int, ...] | None:
+    m = RE_CHAPTER_NUMBER.match(s.strip())
+    if not m:
+        return None
+    return article_number_tuple(m.group(1))
+
+
+def _reset_article_numbering(hs: ArticleHeadingState) -> None:
+    hs.last_article = None
+    hs.false_forward_anchor = None
+    hs.false_forward_spurious = None
+
+
+def _begin_chapter_heading(hs: ArticleHeadingState, line: str) -> None:
+    _reset_article_numbering(hs)
+    hs.chapter_article_prefix = chapter_heading_article_prefix(line)
+
+
+def _begin_code_section_heading(hs: ArticleHeadingState) -> None:
+    _reset_article_numbering(hs)
+    hs.chapter_article_prefix = None
+
+
+def _under_chapter_prefix(
+    state: ArticleHeadingState, num: tuple[int, ...]
+) -> bool:
+    p = state.chapter_article_prefix
+    if not p or len(num) <= len(p):
+        return False
+    return num[: len(p)] == p
+
+
 def repealed_range_anchor(s: str) -> tuple[int, ...] | None:
     """Последний номер в строке «Статьи N–M … утратили силу» / перечне статей."""
     s = s.strip()
-    if not s or not RE_REPEALED_TAIL.search(s):
-        return None
-    if is_repealed_article_heading(s):
+    if not is_repealed_range_heading_line(s):
         return None
     m = RE_ARTICLES_RANGE.search(s)
     if m:
@@ -336,15 +385,27 @@ def update_toc_state(line_state: StructureLineState, line: str) -> None:
     """TOC = 2+ подряд заголовков без тела; тело — рестарт N ≤ last (P2/Q4)."""
     s = line.strip()
     hs = line_state.heading
-    anchor = repealed_range_anchor(s)
-    if anchor is not None:
-        hs.last_article = anchor
     if is_paren_boundary_line(s):
         return
-    if RE_CHAPTER_HEADING.match(s) or RE_SUBSECTION_HEADING.match(s):
+    if RE_CHAPTER_HEADING.match(s):
+        if not hs.in_toc_run:
+            _begin_chapter_heading(hs, s)
         if not hs.in_toc_run:
             hs.consecutive_heading_lines = 0
         return
+    if (
+        RE_SUBSECTION_HEADING.match(s)
+        or RE_PARAGRAPH_SECTION.match(s)
+        or re.match(r"^(?:Раздел|РАЗДЕЛ)\s", s, re.IGNORECASE)
+    ):
+        if not hs.in_toc_run:
+            _begin_code_section_heading(hs)
+        if not hs.in_toc_run:
+            hs.consecutive_heading_lines = 0
+        return
+    anchor = repealed_range_anchor(s)
+    if anchor is not None:
+        hs.last_article = anchor
     if is_repealed_article_heading(s):
         if hs.in_toc_run:
             return
@@ -453,10 +514,15 @@ def accept_article_heading(
 
     toc_style = is_toc_heading_line(s)
     num = article_number_tuple(num_s)
+    under_chapter = num is not None and _under_chapter_prefix(state, num)
     forward = (
         not lowercase
         and num is not None
-        and (state.last_article is None or num > state.last_article)
+        and (
+            state.last_article is None
+            or num > state.last_article
+            or under_chapter
+        )
     )
     needs_boundary = lowercase or (
         num is not None
@@ -499,7 +565,11 @@ def accept_article_heading(
         and num is not None
         and state.false_forward_anchor < num < state.false_forward_spurious
     )
-    allow_restart = (state.after_toc_restart and not lowercase) or recover
+    allow_restart = (
+        (state.after_toc_restart and not lowercase)
+        or recover
+        or under_chapter
+    )
     if num is None or not _accept_monotonic(
         state, num, lowercase=lowercase, allow_restart=allow_restart
     ):

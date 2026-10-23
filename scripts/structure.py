@@ -34,7 +34,7 @@ COLONTITUL_TAIL = re.compile(
 RE_ARTICLE = re.compile(
     r"^(?:Статья|СТАТЬЯ)\s+(\d+(?:\.\d+)?)(?:[.\s—–-]\s*(.*))?$"
 )
-RE_CHAPTER = re.compile(r"^(?:Глава|ГЛАВА)\s+(\d+)", re.IGNORECASE)
+RE_CHAPTER = re.compile(r"^(?:Глава|ГЛАВА)\s+(\d+(?:\.\d+)*)", re.IGNORECASE)
 RE_PART = re.compile(
     r"^Часть\s+(?:первая|вторая|третья|четв[её]ртая|пят(?:ая|ая)|(\d+))",
     re.IGNORECASE,
@@ -370,11 +370,23 @@ def _update_ctx_from_paragraph(
         ctx.chapter = m.group(1)
         if heading_state is not None and ctx.doc_kind == "code":
             heading_state.allow_large_forward = True
+        if ctx.doc_kind == "code" and (
+            heading_state is None or not heading_state.in_toc_run
+        ):
+            ctx.article = None
+            ctx.article_title = None
+            ctx.point = None
+            ctx.subpoint = None
         return ctx.doc_kind == "code"
 
     if ctx.doc_kind == "code" and RE_PARAGRAPH_SECTION.match(s):
         if heading_state is not None:
             heading_state.allow_large_forward = True
+        if heading_state is None or not heading_state.in_toc_run:
+            ctx.article = None
+            ctx.article_title = None
+            ctx.point = None
+            ctx.subpoint = None
         return True
 
     m = RE_PART.match(s)
@@ -390,6 +402,13 @@ def _update_ctx_from_paragraph(
     if RE_SECTION_CODE.match(s):
         if heading_state is not None and ctx.doc_kind == "code":
             heading_state.allow_large_forward = True
+        if ctx.doc_kind == "code" and (
+            heading_state is None or not heading_state.in_toc_run
+        ):
+            ctx.article = None
+            ctx.article_title = None
+            ctx.point = None
+            ctx.subpoint = None
         return ctx.doc_kind == "code"
 
     m = RE_ANNEX.match(s)
