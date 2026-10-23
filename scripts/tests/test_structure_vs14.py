@@ -10,6 +10,16 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+@pytest.fixture(scope="module")
+def db_ready():
+    from _db_guard import require
+    from db_fixtures import get_test_dsn
+
+    dsn = get_test_dsn()
+    require(dsn, os.environ.get("PG_DSN", ""))
+    return dsn
+
+
 from import_document import quality_gate, smart_split  # noqa: E402
 from render_role_password_sql import render_role_password_sql  # noqa: E402
 from search_core import _exact_match, extract_identifiers  # noqa: E402
