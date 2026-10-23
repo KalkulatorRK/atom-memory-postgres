@@ -58,6 +58,9 @@ def main():
     if args.project:
         cmd += ["--project", args.project]
     cmd += ["--limit", str(args.limit)]
+    sm = os.environ.get("SEARCH_MODE")
+    if sm in ("fts", "vector", "hybrid"):
+        cmd += ["--mode", sm]
     subprocess.run(cmd)
 
 

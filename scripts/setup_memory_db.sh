@@ -23,52 +23,69 @@ if ! [[ "$DB_NAME" =~ $ident && "$DB_USER" =~ $ident ]]; then
     exit 1
 fi
 
-echo "[1/4] Установка PostgreSQL + pgvector..."
-# Версия не зашита: берём установленную (PG_VERSION переопределяет) или ставим
-# метапакеты дистрибутива, которые тянут актуальную.
-PG_VERSION="${PG_VERSION:-}"
-if [ -z "$PG_VERSION" ] && command -v pg_lsclusters >/dev/null; then
-    PG_VERSION=$(pg_lsclusters --no-header | awk '{print $1; exit}')
+if [ -n "${ADMIN_DSN:-}" ]; then
+  PSQL_ADMIN=(psql "$ADMIN_DSN")
+elif [ "$(id -un)" = "postgres" ]; then
+  PSQL_ADMIN=(psql)
+else
+  PSQL_ADMIN=(sudo -u postgres psql)
 fi
-apt-get update -y
-# Пакета «postgresql-pgvector» нет: pgvector называется по версии, например
-# postgresql-16-pgvector. Ставим сам сервер, узнаём версию, ставим расширение.
-if [ -z "$PG_VERSION" ]; then
+if [ -n "${SETUP_SKIP_INSTALL:-}" ]; then
+  if [ -z "$DB_PASS" ] && [ -n "${MEMORY_DB_PASSWORD:-}" ]; then
+    DB_PASS="$MEMORY_DB_PASSWORD"
+  fi
+  echo "[1/4] Пропуск установки (SETUP_SKIP_INSTALL=1)"
+  echo "[2/4] Пропуск тюнинга конфига"
+else
+  echo "[1/4] Установка PostgreSQL + pgvector..."
+  PG_VERSION="${PG_VERSION:-}"
+  if [ -z "$PG_VERSION" ] && command -v pg_lsclusters >/dev/null; then
+    PG_VERSION=$(pg_lsclusters --no-header | awk '{print $1; exit}')
+  fi
+  apt-get update -y
+  if [ -z "$PG_VERSION" ]; then
     apt-get install -y postgresql
     PG_VERSION=$(pg_lsclusters --no-header | awk '{print $1; exit}')
-else
+  else
     apt-get install -y "postgresql-$PG_VERSION"
-fi
-apt-get install -y "postgresql-$PG_VERSION-pgvector" || {
+  fi
+  apt-get install -y "postgresql-$PG_VERSION-pgvector" || {
     echo "Собрать pgvector вручную: https://github.com/pgvector/pgvector"; exit 1; }
-echo "      PostgreSQL $PG_VERSION"
+  echo "      PostgreSQL $PG_VERSION"
 
-echo "[2/4] Эконом-конфиг (для слабых VPS; на мощных машинах можно пропустить)..."
-CONF="/etc/postgresql/$PG_VERSION/main/postgresql.conf"
-if [ -f "$CONF" ]; then
+  echo "[2/4] Эконом-конфиг (для слабых VPS; на мощных машинах можно пропустить)..."
+  CONF="/etc/postgresql/$PG_VERSION/main/postgresql.conf"
+  if [ -f "$CONF" ]; then
     sed -i "s/^#*shared_buffers.*/shared_buffers = 128MB/" "$CONF"
     sed -i "s/^#*work_mem.*/work_mem = 4MB/" "$CONF"
     sed -i "s/^#*maintenance_work_mem.*/maintenance_work_mem = 64MB/" "$CONF"
     sed -i "s/^#*max_connections.*/max_connections = 20/" "$CONF"
     sed -i "s/^#*effective_cache_size.*/effective_cache_size = 512MB/" "$CONF"
-fi
-if command -v systemctl >/dev/null && systemctl is-system-running >/dev/null 2>&1; then
+  fi
+  if command -v systemctl >/dev/null && systemctl is-system-running >/dev/null 2>&1; then
     systemctl restart postgresql
-elif command -v pg_ctlcluster >/dev/null; then
+  elif command -v pg_ctlcluster >/dev/null; then
     pg_ctlcluster "$PG_VERSION" main restart
+  fi
 fi
 
 echo "[3/4] Создание БД $DB_NAME и пользователя $DB_USER..."
-# Расширение vector — в целевой БД и от суперпользователя: pgvector не trusted,
-# роль приложения его не создаст. CREATE на public выдаётся явно — с PG15 схема
-# public принадлежит pg_database_owner, и GRANT USAGE одной недостаточно.
-sudo -u postgres psql -v ON_ERROR_STOP=1 \
-    -v db_name="$DB_NAME" -v db_user="$DB_USER" -v db_pass="$DB_PASS" <<'SQL'
-SELECT format('CREATE DATABASE %I', :'db_name') \gexec
-SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'db_user', :'db_pass') \gexec
+# Расширение vector — в целевой БД от суперпользователя; роль приложения CREATE не получает.
+if ! "${PSQL_ADMIN[@]}" -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" | grep -q 1; then
+  "${PSQL_ADMIN[@]}" -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${DB_NAME}\""
+fi
+if ! "${PSQL_ADMIN[@]}" -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
+  "${PSQL_ADMIN[@]}" -v ON_ERROR_STOP=1 \
+    -v db_user="$DB_USER" -v db_pass="$DB_PASS" \
+    -c "CREATE ROLE \"${DB_USER}\" LOGIN PASSWORD '${DB_PASS}'"
+else
+  "${PSQL_ADMIN[@]}" -v ON_ERROR_STOP=1 -c "ALTER ROLE \"${DB_USER}\" PASSWORD '${DB_PASS}'"
+fi
+"${PSQL_ADMIN[@]}" -v ON_ERROR_STOP=1 \
+  -v db_name="$DB_NAME" -v db_user="$DB_USER" <<'SQL'
 SELECT format('GRANT CONNECT, TEMPORARY ON DATABASE %I TO %I', :'db_name', :'db_user') \gexec
 SQL
-sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
+"${PSQL_ADMIN[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 SELECT format('GRANT USAGE ON SCHEMA public TO %I', :'db_user') \gexec
 SQL
@@ -79,14 +96,17 @@ SCHEMA="$SCRIPT_DIR/../references/schema.sql"
 # Схему применяет суперпользователь: в дампе есть CREATE EXTENSION и объекты,
 # которые роль приложения создать не может. -v ON_ERROR_STOP=1 обязателен —
 # без него psql возвращает 0 даже при ошибках, и set -e их не ловит.
-sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$SCHEMA"
+"${PSQL_ADMIN[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$SCHEMA"
 for MIGRATION in "$SCRIPT_DIR"/../references/migrations/*.sql; do
     [ -f "$MIGRATION" ] || continue
-    sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$MIGRATION"
+    case "$MIGRATION" in
+      *_down.sql) continue ;;
+    esac
+    "${PSQL_ADMIN[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$MIGRATION"
 done
 
 # Права на созданные объекты — отдельным шагом, после того как таблицы есть.
-sudo -u postgres psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
+"${PSQL_ADMIN[@]}" -d "$DB_NAME" -v ON_ERROR_STOP=1 -v db_user="$DB_USER" <<'SQL'
 SELECT format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO %I', :'db_user') \gexec
 SELECT format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO %I', :'db_user') \gexec
 SELECT format('ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %I', :'db_user') \gexec
@@ -97,3 +117,8 @@ echo ""
 echo "Готово. Задайте строку подключения (пароль в неё подставьте сами):"
 echo "  export PG_DSN=\"postgresql://$DB_USER@localhost:5432/$DB_NAME\""
 echo "Проверка: psql \"\$PG_DSN\" -c \"SELECT count(*) FROM pg_tables WHERE schemaname='public'\""
+
+# Доп. HNSW для не-дефолтного пространства (если задано в окружении)
+if [ -n "${EMBED_PROVIDER:-}" ] && [ "${EMBED_PROVIDER}" = "local" ] && [ -n "${EMBED_LOCAL_MODEL:-}" ]; then
+  bash "$SCRIPT_DIR/vector_index_admin.sh" --model "local:multilingual-e5-base" --dims "${EMBED_DIMS:-768}" || true
+fi

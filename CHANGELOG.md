@@ -1,5 +1,14 @@
 # Журнал изменений
 
+## 1.9.0
+
+- Семантический поиск: провайдеры эмбеддингов (облако OpenAI-compatible по умолчанию, local по объявлению, fake в тестах).
+- Миграция `0004_vector_search.sql` (HNSW, `embed_policy`, откат `0004_vector_search_down.sql`).
+- `scripts/embed_atoms.py` (backfill, dry-run, политика проектов), интеграция с импортом (`--no-embed`).
+- Гибридный поиск `scripts/search_core.py` (FTS + ILIKE + vector, RRF, ярус точных идентификаторов).
+- CLI `--mode fts|vector|hybrid`, MCP-параметр `mode`, расширенный `memory_stats`.
+- `scripts/eval_search.py`, `scripts/bench_search.py`, `scripts/vector_index_admin.sh`, CI с `EMBED_PROVIDER=fake`.
+
 ## 1.8.0
 
 - P0-1: таблицы вырезаются из текста по позиции строк, а не через `str.replace` по содержимому — ячейка «2» больше не стирает числа из обычного текста страницы.

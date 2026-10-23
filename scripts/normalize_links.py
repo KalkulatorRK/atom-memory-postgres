@@ -10,7 +10,6 @@
   python3 normalize_links.py [--version 6]
 """
 import argparse
-import json
 import os
 import sys
 import re

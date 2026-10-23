@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16%2B-336791.svg)](https://www.postgresql.org/)
-[![pgvector](https://img.shields.io/badge/pgvector-0.7%2B-316192.svg)](https://github.com/pgvector/pgvector)
+[![pgvector](https://img.shields.io/badge/pgvector-0.5%2B%20(%E2%89%A50.8%20rec.)-316192.svg)](https://github.com/pgvector/pgvector)
 
 **База знаний для LLM-агента, где документы хранятся атомами, а не «целыми книгами».**
 Агент отвечает точно, со ссылкой на источник (документ + пункт/страница), и ничего не выдумывает.
@@ -36,7 +36,7 @@ hermes skills install https://raw.githubusercontent.com/KalkulatorRK/atom-memory
 ---
 
 
-> **Что работает, а что нет.** Поиск — полнотекстовый (`ru_en`) плюс запасной ILIKE. Таблица `embeddings` и бейдж pgvector — заготовка: ни один скрипт туда не пишет и оттуда не читает. `journal` ведётся, импорт пишет в него строку. Текст документов уходит внешнему LLM только если задан `LLM_API_KEY`; без ключа импорт работает, атомы просто остаются без тегов.
+> **Поиск.** По умолчанию — **гибрид**: FTS (`ru_en`) + ILIKE + семантика (pgvector). Режим `--mode fts` оставляет только полнотекстовый поиск, как в v1.7. Без `EMBED_API_KEY` (и без явного `EMBED_PROVIDER=local`) векторная ветка выключается с предупреждением. Эмбеддинги считаются отдельным ключом `EMBED_API_KEY`, не через `LLM_API_KEY`. См. `.env.example` и раздел «Приватность» ниже.
 
 ## Зачем
 
@@ -53,7 +53,7 @@ hermes skills install https://raw.githubusercontent.com/KalkulatorRK/atom-memory
 | Возможность | Как работает |
 |---|---|
 | Импорт PDF | Конвейер: нормализация → умная резка по предложениям → таблицы/схемы целиком → LLM-обогащение → запись |
-| Поиск по-русски | Морфология (FTS `to_tsvector('russian')`) + fallback по числам/токенам |
+| Поиск по-русски | Гибрид FTS `ru_en` + ILIKE + вектор (RRF); точные номера (статья, ГОСТ) не проигрывают семантике |
 | Связи атомов | «см. рисунок 3» → `atom_links`, поиск дотягивает схему к ответу |
 | Версионирование | Переимпорт = новая версия, старые атомы `superseded` (история сохраняется) |
 | Целостность | `content_sha` (sha256) — ответ не соберётся из атомов разных редакций |
@@ -106,7 +106,11 @@ PDF → [1] разбор (pymupdf) → [2] таблицы/схемы целик�
         sources → versions (sha256) → atoms (+ atom_links)
 ```
 
-Поиск: фильтры по метаданным (проект/теги/тип) → FTS русская морфология → связанные атомы.
+Поиск: гибрид FTS + ILIKE + вектор (RRF) → связанные атомы. Backfill: `python3 scripts/embed_atoms.py --dry-run` (оценка), затем без `--dry-run`.
+
+### Приватность эмбеддингов
+
+Облачный провайдер получает тексты атомов (backfill/импорт) и **текст поискового запроса** в режимах `hybrid`/`vector`. Ключ — только `EMBED_API_KEY`. Для чувствительных проектов: `python3 scripts/embed_atoms.py --set-policy my-project local_only` или `none`. Loopback `EMBED_BASE_URL` (vLLM/Ollama на localhost) не считается внешней отправкой.
 
 ## Архитектура БД
 
