@@ -10,8 +10,11 @@ trap 'rm -rf "$STAGE"' EXIT
 
 # git archive отдаёт только отслеживаемые файлы (без .git/.github/pyc, если не в git)
 if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    # .github/ лежит в git (workflows), но в архиве скилла ему не место —
+    # без --exclude проверка ниже валит сборку на собственном архиве.
     git -C "$ROOT" archive --format=tar HEAD \
-        | tar -x -C "$STAGE" --transform 's,^,data-science/atom-memory-postgres/,'
+        | tar -x -C "$STAGE" --transform 's,^,data-science/atom-memory-postgres/,' \
+            --exclude='.github' --exclude='.github/*'
 else
     tar -C "$ROOT" \
         --exclude .git --exclude .github --exclude __pycache__ --exclude '*.pyc' \
