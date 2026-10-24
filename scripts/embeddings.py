@@ -96,14 +96,20 @@ def estimate_tokens(text: str) -> int:
         enc = tiktoken.get_encoding("cl100k_base")
         return len(enc.encode(text))
     except Exception:
-        return max(1, (len(text) + 2) // 3)
+        # Кириллица ~2 симв/токен, но HTML/markdown-таблицы (`|`, `<td>` и т.п.)
+        # токенизируются ~1.5 симв/токен. Старая оценка len/3 пропускала длинные
+        # таблицы мимо усечения: 16671 сим. давали 8193 токена при лимите 8192,
+        # и backfill падал с HTTP 400. Консервативно берём ~1.5.
+        return (len(text) * 2 + 2) // 3
 
 
 def truncate_to_tokens(text: str, max_tokens: int) -> tuple[str, bool]:
     if estimate_tokens(text) <= max_tokens:
         return text, False
-    # грубо по символам, затем по границе строки
-    approx = max_tokens * 3
+    # Усекаем по символам с запасом ~30%, затем по границе строки. Без запаса
+    # 8192*1.5 симв. HTML-таблицы всё равно давали >8192 токена (замер на
+    # реальном корпусе: 14745 симв -> 8193 токена).
+    approx = int(max_tokens * 1.4)
     cut = text[:approx]
     nl = cut.rfind("\n")
     if nl > approx // 4:
